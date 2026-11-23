@@ -61,6 +61,15 @@ curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
 # Pelo navegador: http://localhost:8000/docs -> botão "Authorize" -> cole o token
 
+# 6c. Limite por minuto: LIMITE_POR_MINUTO chamadas por usuário do token e
+#     LIMITE_LOGIN_POR_MINUTO tentativas de /login por IP. Passou disso, a
+#     resposta é 429 com o header Retry-After (segundos até liberar).
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/login \
+    -H "Content-Type: application/json" -d '{"usuario":"x","senha":"errada"}'
+done
+# -> 401 até estourar o limite do minuto e depois 429
+
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
 

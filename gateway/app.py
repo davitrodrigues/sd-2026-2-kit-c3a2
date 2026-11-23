@@ -1,17 +1,23 @@
-# gateway: porta de entrada unica, confere o token e repassa para a inferencia.
+# gateway: porta de entrada unica, confere o token, limita o ritmo de cada
+# cliente e repassa para a inferencia.
 #
 # rodar: uvicorn app:app --port 8000
 # obrigatorias no ambiente: JWT_SEGREDO, GATEWAY_USUARIO e GATEWAY_SENHA
+import hashlib
 import hmac
+import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
 
 import jwt
+import redis
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+
+log = logging.getLogger("uvicorn.error")
 
 
 # le uma variavel obrigatoria e recusa subir sem ela, em vez de usar um padrao.
@@ -30,6 +36,18 @@ GATEWAY_USUARIO = _env_obrigatoria("GATEWAY_USUARIO")
 GATEWAY_SENHA = _env_obrigatoria("GATEWAY_SENHA")
 JWT_EXPIRA_MINUTOS = int(os.getenv("JWT_EXPIRA_MINUTOS", "30"))
 JWT_ALGORITMO = "HS256"
+
+LIMITE_POR_MINUTO = int(os.getenv("LIMITE_POR_MINUTO", "10"))
+LIMITE_LOGIN_POR_MINUTO = int(os.getenv("LIMITE_LOGIN_POR_MINUTO", "5"))
+JANELA_SEGUNDOS = 60
+# contador no redis, e nao em memoria, para valer igual em todas as replicas.
+_redis = redis.Redis.from_url(
+    os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+    # curto para um redis lento ou fora do ar nao segurar a requisicao
+    socket_connect_timeout=0.5, socket_timeout=0.5)
+# derivada do segredo do jwt para nao usar a mesma chave em duas funcoes.
+_CHAVE_APELIDO = hmac.new(JWT_SEGREDO.encode(), b"limite",
+                          hashlib.sha256).digest()
 
 
 class Entrada(BaseModel):
@@ -74,6 +92,52 @@ def usuario_atual(
     return dados["sub"]
 
 
+# ip de quem chamou, a chave do limite no /login, onde ainda nao ha usuario.
+def ip_do_cliente(request: Request) -> str:
+    return request.client.host if request.client else "desconhecido"
+
+
+# troca ip ou usuario por um apelido, para o redis nao guardar dado pessoal.
+def _apelido(cliente: str) -> str:
+    # com segredo porque o sha puro de um ipv4 se desfaz testando todos os ips
+    return hmac.new(_CHAVE_APELIDO, cliente.encode(),
+                    hashlib.sha256).hexdigest()
+
+
+# monta uma dependencia que deixa cada cliente fazer ate maximo por minuto.
+def limitar(escopo: str, maximo: int, cliente_de):
+
+    # conta esta requisicao do cliente e barra com 429 quem passou do maximo.
+    def dependencia(response: Response, cliente: str = Depends(cliente_de)):
+        agora = int(time.time())
+        # o numero da janela na chave zera a contagem quando o minuto vira
+        janela = agora // JANELA_SEGUNDOS
+        chave = f"limite:{escopo}:{_apelido(cliente)}:{janela}"
+        try:
+            # incr e expire na mesma transacao, entao nunca sobra chave sem ttl
+            contagem, _ = (_redis.pipeline().incr(chave)
+                           .expire(chave, JANELA_SEGUNDOS).execute())
+        except redis.RedisError as e:
+            # fail-open porque o limite protege o sistema, nao e a funcao dele
+            log.warning("redis indisponivel, passou sem limite: %s", e)
+            return
+        cabecalhos = {"X-RateLimit-Limit": str(maximo),
+                      "X-RateLimit-Remaining": str(max(maximo - contagem, 0))}
+        if contagem > maximo:
+            cabecalhos["Retry-After"] = str(
+                JANELA_SEGUNDOS - agora % JANELA_SEGUNDOS)
+            raise HTTPException(status_code=429, headers=cabecalhos,
+                                detail="limite de requisicoes excedido")
+        response.headers.update(cabecalhos)
+
+    return dependencia
+
+
+# o do usuario roda depois do token, entao sem token e 401 e nao gasta cota.
+limite_por_usuario = limitar("usuario", LIMITE_POR_MINUTO, usuario_atual)
+limite_por_ip = limitar("login", LIMITE_LOGIN_POR_MINUTO, ip_do_cliente)
+
+
 # loga metodo, rota e status de cada requisicao, nunca senha nem token.
 @app.middleware("http")
 async def registrar(request: Request, call_next):
@@ -91,8 +155,8 @@ def saude():
     return {"status": "ok"}
 
 
-# confere usuario e senha e devolve um token com validade.
-@app.post("/login")
+# confere usuario e senha e devolve um token, com poucas tentativas por ip.
+@app.post("/login", dependencies=[Depends(limite_por_ip)])
 def login(credenciais: Credenciais):
     # os dois sempre e em tempo constante, em bytes pois str so aceita ascii
     usuario_ok = hmac.compare_digest(credenciais.usuario.encode(),
@@ -114,10 +178,9 @@ def login(credenciais: Credenciais):
             "expira_em": JWT_EXPIRA_MINUTOS * 60}
 
 
-# repassa o texto para a inferencia, so para quem tem token valido.
-@app.post("/predict")
+# repassa o texto para a inferencia, so para quem tem token valido e cota.
+@app.post("/predict", dependencies=[Depends(limite_por_usuario)])
 def predict(entrada: Entrada, usuario: str = Depends(usuario_atual)):
-    # tarefa 2: rate limit por cliente, com usuario como chave
     try:
         r = requests.post(f"{URL_INFERENCIA}/predict",
                           json=entrada.model_dump(), timeout=10)
