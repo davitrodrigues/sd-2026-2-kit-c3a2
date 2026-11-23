@@ -46,9 +46,20 @@ cp .env.example .env
 docker compose up --build
 
 # 6. Teste pelo gateway (nunca pelos serviços diretamente)
-curl http://localhost:8000/saude
+curl http://localhost:8000/saude        # pública: é o healthcheck do deploy
+
+# 6a. Faça login com GATEWAY_USUARIO / GATEWAY_SENHA do seu .env
+curl -X POST http://localhost:8000/login \
+  -H "Content-Type: application/json" \
+  -d '{"usuario":"admin","senha":"troque-esta-senha"}'
+# -> {"access_token":"eyJ...","token_type":"bearer","expira_em":1800}
+
+# 6b. Use o access_token nas rotas protegidas (sem ele a resposta é 401)
+TOKEN="cole-aqui-o-access_token"
 curl -X POST http://localhost:8000/predict \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
+# Pelo navegador: http://localhost:8000/docs -> botão "Authorize" -> cole o token
 
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```

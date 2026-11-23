@@ -4,7 +4,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 
 ## Nucleo obrigatorio
 
-- [ ] **1. Autenticacao JWT no gateway** - `gateway/app.py`
+- [x] **1. Autenticacao JWT no gateway** - `gateway/app.py`
       Rota de login que emite o token e protecao das demais rotas (401 sem token). (Aula 16)
 
 - [ ] **2. Rate limit no gateway** - `gateway/app.py`
