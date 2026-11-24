@@ -7,8 +7,16 @@
 #        (fila) -> worker(s) -> redis (resultado) -> inferencia -> gateway
 
 # configuracao comum aos servicos que falam com o redis
+# um servico parado some do dns interno do docker, e a consulta pelo nome dele
+# demoraria ~4s para falhar, mais que os tempos-limite; o resolvedor desiste
+# em 1s para a falha aparecer rapido e a retentativa/disjuntor agirem.
+x-dns: &dns-rapido
+  dns_opt: ["timeout:1", "attempts:1"]
+
 x-redis: &redis-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  REDIS_TIMEOUT: ${REDIS_TIMEOUT:-1}
+  REDIS_TENTATIVAS: ${REDIS_TENTATIVAS:-1}
 
 services:
   redis:
@@ -28,6 +36,7 @@ services:
 
   inferencia:
     build: ./inferencia
+    <<: *dns-rapido
     # sem "ports": so e acessivel pela rede interna, sempre via gateway
     environment:
       <<: *redis-env
@@ -37,8 +46,11 @@ services:
 
   worker:
     build: ./worker
+    <<: *dns-rapido
     environment:
       <<: *redis-env
+      WORKER_ESPERA_REDIS_BASE: ${WORKER_ESPERA_REDIS_BASE:-1}
+      WORKER_ESPERA_REDIS_MAXIMA: ${WORKER_ESPERA_REDIS_MAXIMA:-30}
     # varios workers dividem a mesma fila (sem porta nem nome fixo, escala)
     deploy:
       replicas: ${WORKERS:-2}
@@ -48,6 +60,7 @@ services:
 
   gateway:
     build: ./gateway
+    <<: *dns-rapido
     ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
       <<: *redis-env
@@ -58,6 +71,12 @@ services:
       GATEWAY_SENHA: ${GATEWAY_SENHA:-troque-esta-senha}
       LIMITE_POR_MINUTO: ${LIMITE_POR_MINUTO:-10}
       LIMITE_LOGIN_POR_MINUTO: ${LIMITE_LOGIN_POR_MINUTO:-5}
+      INFERENCIA_TIMEOUT_CONEXAO: ${INFERENCIA_TIMEOUT_CONEXAO:-1}
+      INFERENCIA_TIMEOUT_LEITURA: ${INFERENCIA_TIMEOUT_LEITURA:-3}
+      INFERENCIA_TENTATIVAS: ${INFERENCIA_TENTATIVAS:-3}
+      INFERENCIA_ESPERA_BASE: ${INFERENCIA_ESPERA_BASE:-0.2}
+      DISJUNTOR_LIMITE_FALHAS: ${DISJUNTOR_LIMITE_FALHAS:-3}
+      DISJUNTOR_ESPERA_SEGUNDOS: ${DISJUNTOR_ESPERA_SEGUNDOS:-15}
     depends_on:
       redis: {condition: service_healthy}
       # espera o healthcheck do Dockerfile da inferencia (modelo carregado)

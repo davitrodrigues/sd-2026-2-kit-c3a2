@@ -19,7 +19,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [ ] **5. Deploy em nuvem (free tier)**
       Publicar e informar a URL publica no README. (Aula 13)
 
-- [ ] **6. Resiliencia**
+- [x] **6. Resiliencia**
       Tempo-limite, retentativa com espera progressiva e circuit breaker. (Aula 11)
 
 - [ ] **7. Observabilidade**

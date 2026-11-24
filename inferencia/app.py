@@ -7,7 +7,9 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+import redis
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import fila
@@ -33,6 +35,19 @@ app = FastAPI(title="Servico de Inferencia - C3.A2", lifespan=ciclo_de_vida)
 
 class Entrada(BaseModel):
     texto: str
+    # id opcional mandado pelo gateway: repetir o pedido com o mesmo id nao
+    # enfileira de novo (idempotencia, para a retentativa ser segura)
+    id: uuid.UUID | None = None
+
+
+# redis fora do ar (mesmo depois das retentativas do cliente) vira 503, que o
+# gateway trata como falha transitoria, e nao um 500 generico.
+@app.exception_handler(redis.RedisError)
+def _redis_fora(_request: Request, erro: redis.RedisError):
+    print(f"[inferencia] redis indisponivel: {type(erro).__name__}", flush=True)
+    return JSONResponse(status_code=503,
+                        content={"detail": "fila indisponivel"},
+                        headers={"Retry-After": "5"})
 
 
 @app.get("/saude")
@@ -63,7 +78,8 @@ def predict(entrada: Entrada):
     try:
         if not entrada.texto.strip():
             raise HTTPException(status_code=400, detail="texto vazio")
-        identificador = fila.enfileirar(entrada.texto)
+        identificador = fila.enfileirar(
+            entrada.texto, str(entrada.id) if entrada.id else None)
         return {"id": identificador}
     finally:
         registrar_requisicao(identificador, len(entrada.texto), inicio,

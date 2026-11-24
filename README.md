@@ -88,8 +88,46 @@ docker compose up -d --scale worker=3   # mais workers dividindo a fila
 docker compose down      # para tudo (os dados do redis ficam no volume)
 docker compose down -v   # para tudo e apaga o volume do redis
 
+# 6f. Resiliência (veja a seção "Resiliência" abaixo). Para ver funcionando:
+docker compose pause inferencia   # trava a inferência
+#  -> 3 pedidos seguidos: 503 após ~9s cada (tempo-limite + 3 tentativas)
+#  -> 4º pedido: 503 na hora com Retry-After (disjuntor aberto)
+curl http://localhost:8000/saude  # {"disjuntor_inferencia":"aberto"}
+docker compose unpause inferencia # após 15s o disjuntor testa e fecha sozinho
+
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
+
+---
+
+## Resiliência
+
+| Onde | Mecanismo | Padrão (`.env`) |
+|---|---|---|
+| gateway → inferência | **tempo-limite** separado para conectar e para ler | `INFERENCIA_TIMEOUT_CONEXAO=1`, `INFERENCIA_TIMEOUT_LEITURA=3` (s) |
+| gateway → inferência | **retentativa com espera progressiva** (0,2 s, 0,4 s… com jitter), só em falha transitória: rede, tempo-limite e 5xx. Erro 4xx não se repete | `INFERENCIA_TENTATIVAS=3`, `INFERENCIA_ESPERA_BASE=0.2` |
+| gateway → inferência | **circuit breaker** por fora das tentativas: abre após N falhas seguidas e responde 503 na hora com `Retry-After`; depois da espera deixa uma chamada de teste passar e fecha se ela der certo. Estado em `GET /saude` | `DISJUNTOR_LIMITE_FALHAS=3`, `DISJUNTOR_ESPERA_SEGUNDOS=15` |
+| gateway → inferência | **idempotência**: o gateway gera o id da tarefa e a inferência só enfileira se o id ainda não existe (script Lua atômico no Redis), então repetir um `POST /predict` não duplica a tarefa | — |
+| inferência / worker → Redis | tempo-limite curto e retentativa no próprio cliente Redis. Com o Redis fora, a inferência responde **503** (e não 500), que o gateway trata como falha transitória | `REDIS_TIMEOUT=1`, `REDIS_TENTATIVAS=1` |
+| worker → Redis | com o Redis fora, o worker **não cai**: espera 1, 2, 4… s (teto 30 s, com jitter) e retoma sozinho quando ele volta | `WORKER_ESPERA_REDIS_BASE=1`, `WORKER_ESPERA_REDIS_MAXIMA=30` |
+| worker | falha na inferência: até 3 tentativas e depois fila de descarte (dead-letter, do C1.A2) | — |
+| gateway → Redis (rate limit) | *fail-open*: se o Redis cair, o limite deixa passar em vez de derrubar o gateway | — |
+| todos | `restart: unless-stopped` e healthchecks no compose | — |
+
+Decisões e limites:
+- **Retentativa só numa camada.** Se o gateway e a inferência repetissem as
+  chamadas um por cima do outro, as tentativas se multiplicariam (3 × 3 = 9) e o
+  cliente esperaria mais que o tempo-limite. Por isso o cliente Redis da
+  inferência tenta pouco e falha logo, e quem repete é o gateway.
+- **O disjuntor fica na memória de cada réplica do gateway.** Com várias réplicas,
+  cada uma abre o seu sozinha. Isso é aceitável: o pior caso é algumas falhas a
+  mais até todas abrirem.
+- **O worker entrega no máximo uma vez.** Se o Redis cair entre o `BLPOP` e a
+  gravação do resultado, aquela tarefa se perde (o id aparece no log). Garantir
+  pelo menos uma entrega exigiria uma fila com confirmação (`BLMOVE` + lista de
+  processamento).
+- `dns_opt` no compose: um container parado some do DNS do Docker e a consulta
+  levaria ~4 s para falhar. O resolvedor desiste em 1 s para a falha ser rápida.
 
 ---
 
@@ -99,6 +137,7 @@ docker compose down -v   # para tudo e apaga o volume do redis
 sd-2026-2-kit-c3a2/
 ├── gateway/
 │   ├── app.py              # TAREFAS 1 e 2 (JWT e rate limit)
+│   ├── resiliencia.py      # TAREFA 6 (retentativa e circuit breaker)
 │   └── Dockerfile          # TAREFA 3
 ├── inferencia/             # API de inferência do C1.A2 + Dockerfile (TAREFA 3)
 ├── worker/                 # worker de fila do C1.A2 + Dockerfile (TAREFA 3)
