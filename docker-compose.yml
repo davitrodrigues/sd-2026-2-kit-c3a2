@@ -1,41 +1,71 @@
+# sobe a plataforma inteira com um comando:  docker compose up --build
+#
+# toda configuracao vem do .env (copie o .env.example). os valores depois de
+# ":-" sao so o padrao de desenvolvimento, para o clone rodar mesmo sem .env.
+#
+# fluxo: cliente -> gateway (8000, unica porta publica) -> inferencia -> redis
+#        (fila) -> worker(s) -> redis (resultado) -> inferencia -> gateway
+
+# configuracao comum aos servicos que falam com o redis
+x-redis: &redis-env
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
 services:
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    # aof: a fila e os resultados sobrevivem a um restart do redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-dados:/data
+    # so no localhost da maquina, para depurar; fora dela o redis nao aparece
+    ports: ["127.0.0.1:${REDIS_PORTA:-6379}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
+      timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   inferencia:
     build: ./inferencia
+    # sem "ports": so e acessivel pela rede interna, sempre via gateway
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      <<: *redis-env
     depends_on:
       redis: {condition: service_healthy}
+    restart: unless-stopped
 
   worker:
     build: ./worker
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      <<: *redis-env
+    # varios workers dividem a mesma fila (sem porta nem nome fixo, escala)
+    deploy:
+      replicas: ${WORKERS:-2}
     depends_on:
       redis: {condition: service_healthy}
+    restart: unless-stopped
 
   gateway:
     build: ./gateway
-    ports: ["8000:8000"]
+    ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
-      - URL_INFERENCIA=http://inferencia:8001
-      - JWT_SEGREDO=${JWT_SEGREDO:-troque-este-segredo}
-      - JWT_EXPIRA_MINUTOS=${JWT_EXPIRA_MINUTOS:-30}
-      - GATEWAY_USUARIO=${GATEWAY_USUARIO:-admin}
-      - GATEWAY_SENHA=${GATEWAY_SENHA:-troque-esta-senha}
-      - REDIS_URL=redis://redis:6379/0
-      - LIMITE_POR_MINUTO=${LIMITE_POR_MINUTO:-10}
-      - LIMITE_LOGIN_POR_MINUTO=${LIMITE_LOGIN_POR_MINUTO:-5}
+      <<: *redis-env
+      URL_INFERENCIA: ${URL_INFERENCIA:-http://inferencia:8001}
+      JWT_SEGREDO: ${JWT_SEGREDO:-troque-este-segredo}
+      JWT_EXPIRA_MINUTOS: ${JWT_EXPIRA_MINUTOS:-30}
+      GATEWAY_USUARIO: ${GATEWAY_USUARIO:-admin}
+      GATEWAY_SENHA: ${GATEWAY_SENHA:-troque-esta-senha}
+      LIMITE_POR_MINUTO: ${LIMITE_POR_MINUTO:-10}
+      LIMITE_LOGIN_POR_MINUTO: ${LIMITE_LOGIN_POR_MINUTO:-5}
     depends_on:
       redis: {condition: service_healthy}
-      inferencia: {condition: service_started}
+      # espera o healthcheck do Dockerfile da inferencia (modelo carregado)
+      inferencia: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  redis-dados:
 
 # Observe: os servicos se referenciam pelo NOME (inferencia, redis),
 # nunca por IP fixo. Isso e descoberta de servicos. (Aula 14)

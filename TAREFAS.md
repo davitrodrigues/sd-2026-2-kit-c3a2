@@ -13,7 +13,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [x] **3. Dockerfile de cada servico**
       Um Dockerfile por servico. Use `Dockerfile.exemplo` como ponto de partida. (Aula 13)
 
-- [ ] **4. docker-compose completo**
+- [x] **4. docker-compose completo**
       O sistema inteiro deve subir com UM comando. (Aula 14)
 
 - [ ] **5. Deploy em nuvem (free tier)**

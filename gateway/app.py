@@ -8,6 +8,7 @@ import hmac
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -178,14 +179,39 @@ def login(credenciais: Credenciais):
             "expira_em": JWT_EXPIRA_MINUTOS * 60}
 
 
-# repassa o texto para a inferencia, so para quem tem token valido e cota.
-@app.post("/predict", dependencies=[Depends(limite_por_usuario)])
-def predict(entrada: Entrada, usuario: str = Depends(usuario_atual)):
+# chama a inferencia e devolve o json; erro do cliente (4xx) volta igual, e
+# falha de rede ou 5xx vira 503, sem expor o endereco interno na resposta.
+def _chamar_inferencia(metodo: str, caminho: str, **kwargs) -> dict:
     try:
-        r = requests.post(f"{URL_INFERENCIA}/predict",
-                          json=entrada.model_dump(), timeout=10)
-        r.raise_for_status()
-        return r.json()
+        r = requests.request(metodo, f"{URL_INFERENCIA}{caminho}",
+                             timeout=10, **kwargs)
     except requests.RequestException as e:
+        log.warning("inferencia inacessivel: %s", e)
         raise HTTPException(status_code=503,
-                            detail=f"servico de inferencia indisponivel: {e}")
+                            detail="servico de inferencia indisponivel")
+    if 400 <= r.status_code < 500:
+        try:
+            detalhe = r.json().get("detail", r.reason)
+        except ValueError:
+            detalhe = r.reason
+        raise HTTPException(status_code=r.status_code, detail=detalhe)
+    if r.status_code >= 500:
+        log.warning("inferencia respondeu %s", r.status_code)
+        raise HTTPException(status_code=503,
+                            detail="servico de inferencia indisponivel")
+    return r.json()
+
+
+# repassa o texto para a fila da inferencia e devolve o id (202, assincrono).
+@app.post("/predict", status_code=202,
+          dependencies=[Depends(limite_por_usuario)])
+def predict(entrada: Entrada, usuario: str = Depends(usuario_atual)):
+    return _chamar_inferencia("POST", "/predict", json=entrada.model_dump())
+
+
+# consulta o resultado de uma tarefa pelo id devolvido no /predict.
+# o tipo uuid barra com 422 qualquer id malformado antes de chegar na rede.
+@app.get("/resultado/{tarefa_id}",
+         dependencies=[Depends(limite_por_usuario)])
+def resultado(tarefa_id: uuid.UUID, usuario: str = Depends(usuario_atual)):
+    return _chamar_inferencia("GET", f"/resultado/{tarefa_id}")

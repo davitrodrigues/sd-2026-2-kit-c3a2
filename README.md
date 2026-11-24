@@ -59,6 +59,12 @@ TOKEN="cole-aqui-o-access_token"
 curl -X POST http://localhost:8000/predict \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
+# -> 202 {"id":"563b1b0b-..."}   (assíncrono: a tarefa foi para a fila)
+
+# 6b'. Consulte o resultado com o id (o worker processa em segundo plano)
+curl http://localhost:8000/resultado/563b1b0b-... -H "Authorization: Bearer $TOKEN"
+# -> {"sentimento":"positivo","confianca":0.54,"status":"pronto",...}
+#    status "na_fila" enquanto não terminou; 404 se o id não existir
 # Pelo navegador: http://localhost:8000/docs -> botão "Authorize" -> cole o token
 
 # 6c. Limite por minuto: LIMITE_POR_MINUTO chamadas por usuário do token e
@@ -74,6 +80,13 @@ done
 #     O modelo é treinado no build, então a imagem já sobe pronta.
 docker compose ps        # gateway e inferencia aparecem como (healthy)
 docker compose up -d --scale worker=3   # mais workers dividindo a fila
+
+# 6e. O compose sobe redis -> inferencia -> gateway na ordem certa (espera o
+#     healthcheck de cada um) e WORKERS réplicas do worker (padrão 2).
+#     Só o gateway tem porta pública; inferencia e worker ficam na rede interna
+#     e o redis só em 127.0.0.1. Tudo vem do .env (veja .env.example).
+docker compose down      # para tudo (os dados do redis ficam no volume)
+docker compose down -v   # para tudo e apaga o volume do redis
 
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
@@ -91,7 +104,7 @@ sd-2026-2-kit-c3a2/
 ├── worker/                 # worker de fila do C1.A2 + Dockerfile (TAREFA 3)
 ├── deploy/INSTRUCOES.md    # passo a passo do free tier
 ├── Dockerfile.exemplo      # modelo para os demais serviços
-├── docker-compose.yml      # TAREFA 4
+├── docker-compose.yml      # TAREFA 4 (stack inteira com um comando)
 └── TAREFAS.md              # <- comece por aqui
 ```
 
