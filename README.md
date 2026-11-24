@@ -70,6 +70,11 @@ for i in 1 2 3 4 5 6; do
 done
 # -> 401 até estourar o limite do minuto e depois 429
 
+# 6d. Cada serviço tem o seu Dockerfile (python:3.12-slim, usuário não-root).
+#     O modelo é treinado no build, então a imagem já sobe pronta.
+docker compose ps        # gateway e inferencia aparecem como (healthy)
+docker compose up -d --scale worker=3   # mais workers dividindo a fila
+
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
 
@@ -81,9 +86,9 @@ done
 sd-2026-2-kit-c3a2/
 ├── gateway/
 │   ├── app.py              # TAREFAS 1 e 2 (JWT e rate limit)
-│   └── Dockerfile          # PRONTO - use de modelo
-├── inferencia/             # traga o seu C1.A2 para cá
-├── worker/                 # traga o seu worker para cá
+│   └── Dockerfile          # TAREFA 3
+├── inferencia/             # API de inferência do C1.A2 + Dockerfile (TAREFA 3)
+├── worker/                 # worker de fila do C1.A2 + Dockerfile (TAREFA 3)
 ├── deploy/INSTRUCOES.md    # passo a passo do free tier
 ├── Dockerfile.exemplo      # modelo para os demais serviços
 ├── docker-compose.yml      # TAREFA 4

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.joblib
+README.md
+Dockerfile
+.dockerignore
