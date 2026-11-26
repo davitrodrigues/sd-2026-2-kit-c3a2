@@ -20,6 +20,25 @@ para entrevista de emprego.
 
 ---
 
+## No ar
+
+A plataforma está publicada no **Railway**, só por HTTPS:
+
+**https://gateway-production-f3318087.up.railway.app**
+
+| Rota | O que é |
+|---|---|
+| [`/docs`](https://gateway-production-f3318087.up.railway.app/docs) | Documentação interativa (Swagger): `/login`, depois o botão *Authorize* com o token |
+| [`/saude`](https://gateway-production-f3318087.up.railway.app/saude) | Healthcheck público: `{"status":"ok","disjuntor_inferencia":"fechado"}` |
+
+As **credenciais de teste** do `/login` foram enviadas ao professor **pelo AVA**: o
+repositório é público e não guarda senha. O passo a passo do teste está em
+[Testar na nuvem](#testar-na-nuvem) e o do deploy em `deploy/INSTRUCOES.md`. A conta
+do Railway é de teste: quando o crédito ou o prazo de 30 dias acabar, a URL sai do ar
+(veja *Custo*).
+
+---
+
 ## Como começar
 
 Só precisa de **Git** e **Docker** (com o Compose): os serviços, o Redis e o Jaeger
@@ -120,8 +139,41 @@ docker compose unpause inferencia # após 15s, o próximo pedido testa e fecha o
 # 4g. Rastreamento (veja a seção "Observabilidade" abaixo): faça um /predict e
 #     abra http://127.0.0.1:16686 -> Service "gateway" -> Find Traces
 
-# 5. Publique na nuvem seguindo deploy/INSTRUCOES.md
+# 5. Para publicar a sua cópia na nuvem, siga deploy/INSTRUCOES.md
 ```
+
+### Testar na nuvem
+
+O mesmo fluxo do passo 4, trocando `http://127.0.0.1:8000` pela URL pública e usando
+o usuário e a senha enviados pelo AVA:
+
+```bash
+BASE=https://gateway-production-f3318087.up.railway.app
+curl $BASE/saude
+curl -X POST $BASE/login -H "Content-Type: application/json" \
+  -d '{"usuario":"<usuario do AVA>","senha":"<senha do AVA>"}'
+TOKEN="cole-aqui-o-access_token"
+curl -X POST $BASE/predict -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
+curl $BASE/resultado/<id-devolvido-pelo-predict> -H "Authorization: Bearer $TOKEN"
+```
+
+No PowerShell, o bloco do passo 4 serve inteiro: troque só a linha do `$base` por
+`$base = "https://gateway-production-f3318087.up.railway.app"` e o usuário e a senha
+do login pelos do AVA.
+
+O que muda em relação ao compose:
+- **HTTPS (tarefa 8):** o TLS é terminado na **borda do Railway**, que emite e renova
+  sozinha o certificado (Let's Encrypt, `*.up.railway.app`, TLS 1.3). Um pedido em
+  `http://` recebe **301 para `https://`**. Da borda até o container a requisição
+  segue pela rede interna do Railway, por isso o gateway continua escutando HTTP na
+  porta 8000 e não precisou de certificado nem de código novo.
+- **Só o gateway é público.** Inferência, worker e Redis ficam na rede privada do
+  projeto, sem domínio; a porta 8001 não responde de fora.
+- **Rastreamento desligado.** Não há Jaeger no Railway: seria um quinto serviço
+  gastando o crédito de teste, e a interface dele não tem login para ficar exposta.
+  Sem `OTEL_EXPORTER_OTLP_ENDPOINT`, o OpenTelemetry nem é configurado e os serviços
+  rodam igual (veja *Observabilidade*). O rastreamento se demonstra no compose (passo 4g).
 
 ---
 
@@ -184,7 +236,7 @@ worker                modelo prever      (INTERNAL)
 - **Log ↔ trace:** as linhas de log dos três serviços terminam em `trace_id=...`, o
   mesmo ID que se busca no Jaeger (ou em `/api/v3/traces/<trace_id>`).
 - **Só liga com `OTEL_EXPORTER_OTLP_ENDPOINT`.** O compose aponta para
-  `http://jaeger:4318`. Na nuvem, sem Jaeger, basta não definir a variável: nada é
+  `http://jaeger:4318`. No Railway não há Jaeger e a variável não é definida: nada é
   configurado e o serviço roda igual. Com o Jaeger fora do ar, os spans são
   descartados com um aviso só no log. A exportação é em lote e em segundo plano,
   então nenhuma requisição espera por ela.
@@ -212,8 +264,8 @@ o sistema trata o texto como dado pessoal e guarda o mínimo pelo menor tempo.
 | Usuário e senha do `/login` | Autenticar | Só na memória durante a requisição | Não são guardados nem logados. A comparação é em tempo constante |
 | Usuário (dentro do token JWT) | Identificar quem chama e aplicar a cota | Só no token, que fica com o cliente; o servidor não guarda tokens | `JWT_EXPIRA_MINUTOS` (padrão 30 min) |
 | IP do cliente / usuário no rate limit | Limitar tentativas de login e chamadas por minuto | Redis, como **apelido HMAC-SHA256 com segredo** (não dá para voltar ao IP) | 60 s (a chave expira com a janela) |
-| Rastreamento (spans no Jaeger) | Depurar e medir a latência entre os serviços | Memória do Jaeger, interface só em 127.0.0.1 | Até o Jaeger reiniciar (sem volume). Têm rota, status, tempos e id da tarefa; **nunca texto, senha, token ou IP do cliente** (filtrados no exportador) |
-| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada, tempo e `trace_id`; **nunca texto, senha, token ou IP** (o access log do uvicorn, que grava o IP de quem chama, está desligado no gateway e na inferência) |
+| Rastreamento (spans no Jaeger) | Depurar e medir a latência entre os serviços | Memória do Jaeger, interface só em 127.0.0.1. Só no compose: na nuvem o rastreamento está desligado | Até o Jaeger reiniciar (sem volume). Têm rota, status, tempos e id da tarefa; **nunca texto, senha, token ou IP do cliente** (filtrados no exportador) |
+| Logs dos serviços | Operação e depuração | Saída padrão do container; no Railway, a aba de logs de cada serviço | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada, tempo e `trace_id`; **nunca texto, senha, token ou IP** (o access log do uvicorn, que grava o IP de quem chama, está desligado no gateway e na inferência) |
 
 Princípios aplicados (art. 6º da LGPD):
 - **Finalidade e necessidade:** o texto só é usado para a classificação. Ele não
@@ -229,7 +281,9 @@ Princípios aplicados (art. 6º da LGPD):
   disco o texto de toda tarefa, mesmo depois de processada.
 - **Segurança:** só o gateway é exposto; o Redis, a inferência e o worker ficam na
   rede interna. As rotas exigem token e os segredos vêm do `.env`, que não vai para
-  o git. Na nuvem o tráfego deve passar por HTTPS (tarefa 8).
+  o git (na nuvem, das variáveis do Railway). Na nuvem o acesso é **só por HTTPS**
+  (`http://` redireciona), então token, senha e texto não trafegam abertos na
+  internet (tarefa 8).
 - **Direitos do titular:** como nada é guardado por mais de 24 h e o resultado só
   pode ser achado pelo id aleatório (UUID), não há base de usuários para consultar.
   Para apagar um resultado antes do prazo, o operador remove a chave
@@ -280,19 +334,37 @@ proteção contra picos.
 
 ### Custo
 
+- **Onde está publicado:** Railway, numa **conta de teste** (US$ 5 de crédito,
+  válidos por 30 dias), com 4 serviços: Redis (template do Railway, com volume),
+  inferência, 1 worker e gateway. O crédito é gasto pelo uso de CPU, memória, disco
+  e rede dos quatro, ligados o tempo todo. Quando o crédito ou o prazo acabar, o
+  Railway para os serviços e **a URL pública sai do ar**; mantê-la exigiria um plano
+  pago. O Jaeger fica só no compose local e não consome crédito.
+- **Por que não o Render:** no plano grátis do Render não há *background worker*
+  gratuito, e os serviços web gratuitos não recebem tráfego da rede privada, então o
+  gateway não alcançaria a inferência.
 - **Imagens enxutas:** `python:3.12-slim`, sem GPU (o modelo é scikit-learn e roda
-  em CPU). Cabe com folga no menor plano free tier.
-- **Free tier:** instâncias gratuitas costumam "dormir" quando ficam sem uso, e a
-  primeira requisição depois disso paga a subida do container (*cold start*, dezenas
-  de segundos). Como o modelo já vem treinado na imagem, essa subida é a menor
-  possível.
+  em CPU), então cada serviço cabe na menor instância.
+- **Cold start:** se os serviços forem configurados para dormir sem uso (para poupar
+  crédito), a primeira requisição depois disso paga a subida do container. Como o
+  modelo já vem treinado na imagem, essa subida é a menor possível.
 - **Escala onde custa:** só os workers precisam de mais réplicas quando a fila
-  cresce (`WORKERS` no compose, réplicas/HPA no Kubernetes). O gateway e a inferência
-  só repassam e são leves.
+  cresce (`WORKERS` no compose, réplicas/HPA no Kubernetes, *Replicas* no Railway,
+  onde cada réplica a mais também gasta crédito). O gateway e a inferência só
+  repassam e são leves.
 - **O rate limit também controla custo:** um cliente sozinho não consegue gerar
   trabalho ilimitado nos workers.
 - **O TTL dos resultados** (LGPD) também segura a memória do Redis, que é o recurso
   mais caro de manter em plano gerenciado.
+
+### Limitação conhecida: o IP atrás do proxy
+
+No Railway o gateway recebe a conexão do proxy da borda e vê o IP dele, não o do
+cliente; por isso o limite do `/login` por IP (`LIMITE_LOGIN_POR_MINUTO`) é dividido
+entre todos os clientes, e quem errar a senha várias vezes pode travar o login dos
+outros até o minuto virar. Ficou assim de propósito: confiar no `X-Forwarded-For` sem
+restringir de onde ele vem deixaria o cliente forjar o IP e escapar do limite (o
+limite das rotas protegidas é por usuário do token e não é afetado).
 
 ---
 
@@ -336,7 +408,7 @@ sd-2026-2-kit-c3a2/
 │   └── Dockerfile          # TAREFA 3
 ├── inferencia/             # API de inferência do C1.A2 + Dockerfile (TAREFA 3)
 ├── worker/                 # worker de fila do C1.A2 + Dockerfile (TAREFA 3)
-├── deploy/INSTRUCOES.md    # passo a passo do free tier
+├── deploy/INSTRUCOES.md    # TAREFAS 5 e 8: passo a passo do deploy no Railway
 ├── Dockerfile.exemplo      # modelo para os demais serviços
 ├── docker-compose.yml      # TAREFA 4 (stack inteira com um comando)
 ├── k8s/                    # extensao: manifests de Kubernetes (kubectl apply -k)
