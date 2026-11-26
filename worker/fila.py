@@ -22,11 +22,17 @@ REDIS_TENTATIVAS = int(os.getenv("REDIS_TENTATIVAS", "1"))
 FILA_TAREFAS = "tarefas"
 FILA_DESCARTE = "tarefas:descarte"
 PREFIXO_RESULTADO = "resultado:"
+# LGPD: o resultado se apaga sozinho depois desse prazo (padrao 24h), em vez
+# de ficar para sempre no redis. vale tambem para o status "na_fila".
+RESULTADO_TTL_SEGUNDOS = int(os.getenv("RESULTADO_TTL_SEGUNDOS", "86400"))
+# a fila de descarte so guarda id, tentativas e erro (sem o texto), e no
+# maximo esse tanto de itens; os mais antigos saem primeiro.
+DESCARTE_MAXIMO = int(os.getenv("DESCARTE_MAXIMO", "1000"))
 
 # so enfileira se o id ainda nao existe, tudo atomico dentro do redis: assim
 # um pedido repetido (retentativa do gateway) nao gera tarefa duplicada.
 _ENFILEIRAR_UMA_VEZ = """
-if redis.call('SET', KEYS[1], ARGV[1], 'NX') then
+if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[3]) then
   redis.call('RPUSH', KEYS[2], ARGV[2])
   return 1
 end
@@ -79,7 +85,8 @@ def enfileirar(texto: str, tarefa_id: str | None = None) -> str:
         _ENFILEIRAR_UMA_VEZ, 2,
         PREFIXO_RESULTADO + tarefa_id, FILA_TAREFAS,
         json.dumps({"status": "na_fila"}),
-        json.dumps({"id": tarefa_id, "texto": texto}))
+        json.dumps({"id": tarefa_id, "texto": texto}),
+        RESULTADO_TTL_SEGUNDOS)
     return tarefa_id
 
 
@@ -92,7 +99,8 @@ def proxima_tarefa():
 
 
 def guardar_resultado(tarefa_id: str, resultado: dict) -> None:
-    cliente().set(PREFIXO_RESULTADO + tarefa_id, json.dumps(resultado))
+    cliente().set(PREFIXO_RESULTADO + tarefa_id, json.dumps(resultado),
+                  ex=RESULTADO_TTL_SEGUNDOS)
 
 
 def buscar_resultado(tarefa_id: str):
@@ -106,8 +114,17 @@ def reenfileirar(tarefa: dict) -> None:
 
 
 def descartar(tarefa: dict, erro: str) -> None:
-    """Manda a tarefa para a fila de descarte, com o motivo da falha."""
-    cliente().rpush(FILA_DESCARTE, json.dumps({"tarefa": tarefa, "erro": erro}))
+    """Manda a tarefa para a fila de descarte, com o motivo da falha.
+
+    Guarda so o id e as tentativas, nunca o texto (minimizacao, LGPD).
+    """
+    registro = {"tarefa": {"id": tarefa["id"],
+                           "tentativas": tarefa.get("tentativas", 0)},
+                "erro": erro}
+    (cliente().pipeline()
+     .rpush(FILA_DESCARTE, json.dumps(registro))
+     .ltrim(FILA_DESCARTE, -DESCARTE_MAXIMO, -1)
+     .execute())
 
 
 def tamanho_descarte() -> int:

@@ -17,6 +17,9 @@ x-redis: &redis-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   REDIS_TIMEOUT: ${REDIS_TIMEOUT:-1}
   REDIS_TENTATIVAS: ${REDIS_TENTATIVAS:-1}
+  # LGPD: prazo de guarda do resultado (s) e tamanho maximo do descarte
+  RESULTADO_TTL_SEGUNDOS: ${RESULTADO_TTL_SEGUNDOS:-86400}
+  DESCARTE_MAXIMO: ${DESCARTE_MAXIMO:-1000}
 
 services:
   redis:

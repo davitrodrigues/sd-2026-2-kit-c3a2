@@ -131,6 +131,42 @@ Decisões e limites:
 
 ---
 
+## Conformidade (LGPD)
+
+A plataforma classifica o sentimento de um texto. O texto é enviado pelo próprio
+cliente e **pode conter dado pessoal** (nome, e-mail, opinião sobre alguém), então
+o sistema trata o texto como dado pessoal e guarda o mínimo pelo menor tempo.
+
+| Dado | Finalidade | Onde fica | Por quanto tempo |
+|---|---|---|---|
+| Texto enviado no `/predict` | Classificar o sentimento (o único motivo de o serviço existir) | Na fila do Redis, só até um worker pegar a tarefa | Segundos (até ser consumido). **Não vai para o log** (só o tamanho) e **não fica no resultado** |
+| Resultado (`sentimento`, `confianca`, `status`) | Devolver a resposta no `GET /resultado/{id}` | Redis, chave `resultado:{id}` | `RESULTADO_TTL_SEGUNDOS` (padrão **24 h**); depois o Redis apaga sozinho |
+| Tarefa que falhou 3 vezes (fila de descarte) | Investigar o erro | Redis, `tarefas:descarte` | Só **id, tentativas e mensagem de erro**, sem o texto. No máximo `DESCARTE_MAXIMO` itens (padrão 1000); os mais antigos saem primeiro |
+| Usuário e senha do `/login` | Autenticar | Só na memória durante a requisição | Não são guardados nem logados. A comparação é em tempo constante |
+| Usuário (dentro do token JWT) | Identificar quem chama e aplicar a cota | Só no token, que fica com o cliente; o servidor não guarda tokens | `JWT_EXPIRA_MINUTOS` (padrão 30 min) |
+| IP do cliente / usuário no rate limit | Limitar tentativas de login e chamadas por minuto | Redis, como **apelido HMAC-SHA256 com segredo** (não dá para voltar ao IP) | 60 s (a chave expira com a janela) |
+| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada e tempo; **nunca texto, senha, token ou IP** (o access log do uvicorn está desligado no gateway porque registrava o IP) |
+
+Princípios aplicados (art. 6º da LGPD):
+- **Finalidade e necessidade:** o texto só é usado para a classificação. Ele não
+  serve para treinar o modelo, que já vem pronto do build, e não é compartilhado
+  com terceiros. Nenhuma chamada sai para fora da rede interna.
+- **Minimização:** o resultado não repete o texto e a fila de descarte não o guarda.
+- **Prazo de retenção:** tudo no Redis tem TTL. O volume do Redis (AOF) mantém só o
+  que ainda não expirou.
+- **Segurança:** só o gateway é exposto; o Redis, a inferência e o worker ficam na
+  rede interna. As rotas exigem token e os segredos vêm do `.env`, que não vai para
+  o git. Na nuvem o tráfego deve passar por HTTPS (tarefa 8).
+- **Direitos do titular:** como nada é guardado por mais de 24 h e o resultado só
+  pode ser achado pelo id aleatório (UUID), não há base de usuários para consultar.
+  Para apagar um resultado antes do prazo, o operador remove a chave
+  `resultado:{id}` no Redis.
+
+Recomendação de uso: não envie dados sensíveis (art. 5º, II: saúde, religião,
+biometria etc.). O serviço não precisa deles para classificar sentimento.
+
+---
+
 ## Estrutura do projeto
 
 ```

@@ -43,6 +43,9 @@ def processar(modelo, tarefa: dict) -> None:
     inicio = time.perf_counter()
     try:
         resultado = modelo.prever(tarefa["texto"])
+        # o cliente ja tem o texto; guardar de novo no redis seria dado
+        # pessoal sem necessidade (minimizacao, LGPD)
+        resultado.pop("texto", None)
         resultado["status"] = "pronto"
         resultado["tempo_ms"] = round((time.perf_counter() - inicio) * 1000, 2)
         fila.guardar_resultado(tarefa["id"], resultado)
