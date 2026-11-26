@@ -30,7 +30,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [x] **9. Secao de conformidade no README**
       Quais dados sao tratados, com qual finalidade e por quanto tempo. (LGPD, Aula 16)
 
-- [ ] **10. Relatorio de trade-offs**
+- [x] **10. Relatorio de trade-offs**
       CAP, custo e latencia do seu sistema.
 
 ## Extensoes opcionais

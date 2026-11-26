@@ -167,6 +167,61 @@ biometria etc.). O serviço não precisa deles para classificar sentimento.
 
 ---
 
+## Trade-offs: CAP, custo e latência
+
+### CAP
+
+O estado compartilhado fica num **único Redis** (fila, resultados e contadores do
+rate limit). Com uma instância só não há réplica para divergir, então o sistema é
+**consistente**. O preço disso é a disponibilidade: se o Redis cai, quem depende dele
+para de aceitar trabalho. Cada parte escolhe um lado de propósito:
+
+| Parte | Escolha | Por quê |
+|---|---|---|
+| `/predict` e `/resultado` | **C** (consistência): Redis fora → 503 com `Retry-After` | Aceitar a tarefa sem conseguir enfileirar seria mentir para o cliente (202 de algo que nunca vai rodar) |
+| Rate limit | **A** (disponibilidade): Redis fora → deixa passar (*fail-open*) | O limite protege o sistema mas não é a função dele. Derrubar o gateway por causa do contador seria pior |
+| Circuit breaker | **A**, com estado local de cada réplica do gateway | Não depende de ninguém para decidir. As réplicas podem discordar por alguns segundos, e isso é aceitável |
+| Resultado | **Consistência eventual**: o `POST /predict` responde 202 e o resultado aparece depois | É o preço da fila assíncrona, que absorve picos e deixa escalar os workers |
+| Worker | **No máximo uma entrega**: a tarefa sai da fila no `BLPOP` | Mais simples. Pelo menos uma entrega pediria `BLMOVE` + lista de processamento (ver Resiliência) |
+
+Para tolerar a queda do Redis, o próximo passo seria Redis com réplica + Sentinel
+(ou um Redis gerenciado). Aí entra o trade-off clássico: a replicação do Redis é
+assíncrona, e um *failover* pode perder as últimas escritas.
+
+### Latência
+
+| Caminho | Tempo típico | Pior caso |
+|---|---|---|
+| `POST /predict` (gateway → inferência → Redis) | Poucos ms: só valida e enfileira | ~9 s com a inferência travada (3 tentativas × 3 s de leitura + espera); com o disjuntor aberto, **503 imediato** |
+| Inferência no worker (TF-IDF + regressão logística) | Da ordem de milissegundos por texto | Cresce com o tamanho da fila: o tempo de espera ≈ tamanho da fila ÷ (workers × vazão de cada um) |
+| `GET /resultado/{id}` | Poucos ms (uma leitura no Redis) | Igual ao `/predict` |
+| Tempo total para o cliente ver o resultado | Latência da fila + **intervalo de polling** do cliente | — |
+
+Decisões: o modelo é treinado **no build** e carregado **uma vez** na subida, então
+nenhuma requisição paga esse custo. O processamento é **assíncrono** porque, com
+modelos mais pesados (um LLM, por exemplo), segurar a conexão HTTP escalaria mal. O
+custo é o cliente ter que consultar depois. Com este modelo, que é muito rápido, a
+rota síncrona da inferência (`/predict-sync`) responderia mais rápido, mas sem
+proteção contra picos.
+
+### Custo
+
+- **Imagens enxutas:** `python:3.12-slim`, sem GPU (o modelo é scikit-learn e roda
+  em CPU). Cabe com folga no menor plano free tier.
+- **Free tier:** instâncias gratuitas costumam "dormir" quando ficam sem uso, e a
+  primeira requisição depois disso paga a subida do container (*cold start*, dezenas
+  de segundos). Como o modelo já vem treinado na imagem, essa subida é a menor
+  possível.
+- **Escala onde custa:** só os workers precisam de mais réplicas quando a fila
+  cresce (`WORKERS` no compose, réplicas/HPA no Kubernetes). O gateway e a inferência
+  só repassam e são leves.
+- **O rate limit também controla custo:** um cliente sozinho não consegue gerar
+  trabalho ilimitado nos workers.
+- **O TTL dos resultados** (LGPD) também segura a memória do Redis, que é o recurso
+  mais caro de manter em plano gerenciado.
+
+---
+
 ## Estrutura do projeto
 
 ```
