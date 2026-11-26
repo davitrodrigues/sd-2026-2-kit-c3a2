@@ -1,5 +1,5 @@
 # gateway: porta de entrada unica, confere o token, limita o ritmo de cada
-# cliente e repassa para a inferencia.
+# cliente e repassa para a inferencia e para o armazenamento vetorial.
 #
 # rodar: uvicorn app:app --port 8000
 # obrigatorias no ambiente: JWT_SEGREDO, GATEWAY_USUARIO e GATEWAY_SENHA
@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -18,7 +19,7 @@ import requests
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 import rastreio
 from resiliencia import (CircuitBreaker, CircuitoAberto, FalhaTransitoria,
@@ -36,22 +37,51 @@ def _env_obrigatoria(nome: str) -> str:
 
 
 app = FastAPI(title="Gateway - C3.A2")
-# o requests instrumentado leva o traceparent no header ate a inferencia
+# o requests instrumentado leva o traceparent no header ate os servicos
 if rastreio.configurar("gateway"):
     rastreio.instrumentar_fastapi(app)
     RequestsInstrumentor().instrument()
-URL_INFERENCIA = os.getenv("URL_INFERENCIA", "http://localhost:8001")
 
-# resiliencia da chamada a inferencia (Aula 11). tempo-limite separado: abrir
-# a conexao e rapido numa rede interna, entao espera pouco; ler da mais folga.
-TIMEOUT_INFERENCIA = (float(os.getenv("INFERENCIA_TIMEOUT_CONEXAO", "1")),
-                      float(os.getenv("INFERENCIA_TIMEOUT_LEITURA", "3")))
-INFERENCIA_TENTATIVAS = int(os.getenv("INFERENCIA_TENTATIVAS", "3"))
-INFERENCIA_ESPERA_BASE = float(os.getenv("INFERENCIA_ESPERA_BASE", "0.2"))
-disjuntor_inferencia = CircuitBreaker(
-    limite_falhas=int(os.getenv("DISJUNTOR_LIMITE_FALHAS", "3")),
-    espera_segundos=float(os.getenv("DISJUNTOR_ESPERA_SEGUNDOS", "15")),
-    conta_como_falha=(FalhaTransitoria,), nome="disjuntor-inferencia")
+
+# servico interno que o gateway chama, com a resiliencia dele (Aula 11).
+@dataclass(frozen=True)
+class Destino:
+    nome: str
+    url: str
+    timeout: tuple[float, float]  # (conectar, ler)
+    tentativas: int
+    espera_base: float
+    disjuntor: CircuitBreaker
+
+
+# monta um disjuntor; os limites valem para todos, o estado e de cada um.
+def _disjuntor(nome: str) -> CircuitBreaker:
+    return CircuitBreaker(
+        limite_falhas=int(os.getenv("DISJUNTOR_LIMITE_FALHAS", "3")),
+        espera_segundos=float(os.getenv("DISJUNTOR_ESPERA_SEGUNDOS", "15")),
+        conta_como_falha=(FalhaTransitoria,), nome=nome)
+
+
+# disjuntor proprio por servico: a queda do vetorial nao barra a inferencia
+disjuntor_inferencia = _disjuntor("disjuntor-inferencia")
+disjuntor_vetorial = _disjuntor("disjuntor-vetorial")
+
+# tempo-limite separado: abrir a conexao e rapido numa rede interna, entao
+# espera pouco; ler da mais folga.
+INFERENCIA = Destino(
+    "inferencia", os.getenv("URL_INFERENCIA", "http://localhost:8001"),
+    (float(os.getenv("INFERENCIA_TIMEOUT_CONEXAO", "1")),
+     float(os.getenv("INFERENCIA_TIMEOUT_LEITURA", "3"))),
+    int(os.getenv("INFERENCIA_TENTATIVAS", "3")),
+    float(os.getenv("INFERENCIA_ESPERA_BASE", "0.2")),
+    disjuntor_inferencia)
+VETORIAL = Destino(
+    "vetorial", os.getenv("URL_VETORIAL", "http://localhost:8002"),
+    (float(os.getenv("VETORIAL_TIMEOUT_CONEXAO", "1")),
+     float(os.getenv("VETORIAL_TIMEOUT_LEITURA", "3"))),
+    int(os.getenv("VETORIAL_TENTATIVAS", "3")),
+    float(os.getenv("VETORIAL_ESPERA_BASE", "0.2")),
+    disjuntor_vetorial)
 
 JWT_SEGREDO = _env_obrigatoria("JWT_SEGREDO")
 GATEWAY_USUARIO = _env_obrigatoria("GATEWAY_USUARIO")
@@ -77,6 +107,14 @@ _CHAVE_APELIDO = hmac.new(JWT_SEGREDO.encode(), b"limite",
 
 class Entrada(BaseModel):
     texto: str
+
+
+# os mesmos limites do vetorial, para o erro sair aqui sem gastar chamada
+class Consulta(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    pergunta: str = Field(min_length=1, max_length=1000)
+    top_k: int = Field(3, ge=1, le=10)
 
 
 class Credenciais(BaseModel):
@@ -177,9 +215,11 @@ async def registrar(request: Request, call_next):
 # rota publica de proposito, porque e o healthcheck do deploy.
 @app.get("/saude")
 def saude():
-    # o gateway esta de pe mesmo com a inferencia fora; o estado do disjuntor
+    # o gateway esta de pe mesmo com um servico fora; o estado dos disjuntores
     # so informa (fechado, aberto ou meio), nao derruba o healthcheck.
-    return {"status": "ok", "disjuntor_inferencia": disjuntor_inferencia.estado}
+    return {"status": "ok",
+            "disjuntor_inferencia": disjuntor_inferencia.estado,
+            "disjuntor_vetorial": disjuntor_vetorial.estado}
 
 
 # confere usuario e senha e devolve um token, com poucas tentativas por ip.
@@ -206,10 +246,11 @@ def login(credenciais: Credenciais):
 
 
 # uma tentativa so; rede, tempo-limite e 5xx viram falha transitoria.
-def _uma_chamada(metodo: str, caminho: str, **kwargs) -> requests.Response:
+def _uma_chamada(destino: Destino, metodo: str, caminho: str,
+                 **kwargs) -> requests.Response:
     try:
-        r = requests.request(metodo, f"{URL_INFERENCIA}{caminho}",
-                             timeout=TIMEOUT_INFERENCIA, **kwargs)
+        r = requests.request(metodo, f"{destino.url}{caminho}",
+                             timeout=destino.timeout, **kwargs)
     except requests.RequestException as e:
         raise FalhaTransitoria(type(e).__name__) from e
     if r.status_code >= 500:
@@ -218,27 +259,28 @@ def _uma_chamada(metodo: str, caminho: str, **kwargs) -> requests.Response:
     return r
 
 
-# chama a inferencia com tempo-limite, retentativa e disjuntor. o disjuntor
+# chama o servico com tempo-limite, retentativa e disjuntor. o disjuntor
 # fica por fora: a sequencia inteira de tentativas conta como uma falha so, e
 # com ele aberto nem tenta, responde 503 na hora (falha rapida).
-def _chamar_inferencia(metodo: str, caminho: str, **kwargs) -> dict:
+def _chamar(destino: Destino, metodo: str, caminho: str, **kwargs) -> dict:
+    indisponivel = f"servico {destino.nome} indisponivel"
     try:
-        r = disjuntor_inferencia.chamar(
-            com_retentativa, lambda: _uma_chamada(metodo, caminho, **kwargs),
-            tentativas=INFERENCIA_TENTATIVAS,
-            espera_base=INFERENCIA_ESPERA_BASE, nome="inferencia")
+        r = destino.disjuntor.chamar(
+            com_retentativa,
+            lambda: _uma_chamada(destino, metodo, caminho, **kwargs),
+            tentativas=destino.tentativas,
+            espera_base=destino.espera_base, nome=destino.nome)
     except CircuitoAberto as e:
         raise HTTPException(
-            status_code=503, detail="servico de inferencia indisponivel",
+            status_code=503, detail=indisponivel,
             headers={"Retry-After": str(max(1, int(e.restante + 0.999)))})
     except FalhaTransitoria as e:
         # o detalhe tecnico (endereco interno) fica so no log
-        # repassa a espera que a inferencia pediu; sem ela, usa a do
-        # disjuntor, o tempo que ja se da para ela se recuperar
+        # repassa a espera que o servico pediu; sem ela, usa a do
+        # disjuntor, o tempo que ja se da para ele se recuperar
         espera = e.retry_after or str(
-            max(1, int(disjuntor_inferencia.espera_segundos + 0.999)))
-        raise HTTPException(status_code=503,
-                            detail="servico de inferencia indisponivel",
+            max(1, int(destino.disjuntor.espera_segundos + 0.999)))
+        raise HTTPException(status_code=503, detail=indisponivel,
                             headers={"Retry-After": espera})
     if r.status_code >= 400:  # erro do cliente (4xx) volta igual
         try:
@@ -255,8 +297,8 @@ def _chamar_inferencia(metodo: str, caminho: str, **kwargs) -> dict:
 @app.post("/predict", status_code=202,
           dependencies=[Depends(limite_por_usuario)])
 def predict(entrada: Entrada, usuario: str = Depends(usuario_atual)):
-    return _chamar_inferencia(
-        "POST", "/predict",
+    return _chamar(
+        INFERENCIA, "POST", "/predict",
         json={"texto": entrada.texto, "id": str(uuid.uuid4())})
 
 
@@ -265,4 +307,11 @@ def predict(entrada: Entrada, usuario: str = Depends(usuario_atual)):
 @app.get("/resultado/{tarefa_id}",
          dependencies=[Depends(limite_por_usuario)])
 def resultado(tarefa_id: uuid.UUID, usuario: str = Depends(usuario_atual)):
-    return _chamar_inferencia("GET", f"/resultado/{tarefa_id}")
+    return _chamar(INFERENCIA, "GET", f"/resultado/{tarefa_id}")
+
+
+# busca no armazenamento vetorial os trechos mais parecidos com a pergunta.
+# so le, entao repetir na retentativa e seguro; a pergunta nao vai para log.
+@app.post("/buscar", dependencies=[Depends(limite_por_usuario)])
+def buscar(consulta: Consulta, usuario: str = Depends(usuario_atual)):
+    return _chamar(VETORIAL, "POST", "/buscar", json=consulta.model_dump())

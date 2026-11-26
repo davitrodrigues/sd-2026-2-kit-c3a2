@@ -33,6 +33,8 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [x] **10. Relatorio de trade-offs**
       CAP, custo e latencia do seu sistema.
 
+- [x] **Armazenamento vetorial** (edital, item 2) - `vetorial/`
+
 ## Extensoes opcionais
 
 - [ ] Autoescalonamento de workers conforme o tamanho da fila

@@ -5,7 +5,9 @@
 #
 # fluxo: cliente -> gateway (8000, unica porta publica) -> inferencia -> redis
 #        (fila) -> worker(s) -> redis (resultado) -> inferencia -> gateway
-# rastreamento: os tres servicos mandam spans ao jaeger (ui em 127.0.0.1:16686)
+#        cliente -> gateway -> vetorial (busca no indice gravado no volume)
+# rastreamento: os quatro servicos mandam spans ao jaeger (ui em
+# 127.0.0.1:16686)
 
 # configuracao comum aos servicos que falam com o redis
 # um servico parado some do dns interno do docker, e a consulta pelo nome dele
@@ -72,6 +74,21 @@ services:
       redis: {condition: service_healthy}
     restart: unless-stopped
 
+  # armazenamento vetorial (do C2.A2): documentos, vetores tf-idf e o
+  # vetorizador num arquivo so, no volume, entao o restart nao reindexa
+  vetorial:
+    build: ./vetorial
+    <<: *dns-rapido
+    # sem "ports": so e acessivel pela rede interna, sempre via gateway
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: vetorial
+      # fixo e nao do .env: tem de ser o mesmo caminho do volume abaixo
+      DIR_DADOS: /app/dados
+    volumes:
+      - vetorial-dados:/app/dados
+    restart: unless-stopped
+
   gateway:
     build: ./gateway
     <<: *dns-rapido
@@ -80,6 +97,7 @@ services:
       <<: [*redis-env, *otel-env]
       OTEL_SERVICE_NAME: gateway
       URL_INFERENCIA: ${URL_INFERENCIA:-http://inferencia:8001}
+      URL_VETORIAL: ${URL_VETORIAL:-http://vetorial:8002}
       JWT_SEGREDO: ${JWT_SEGREDO:-troque-este-segredo}
       JWT_EXPIRA_MINUTOS: ${JWT_EXPIRA_MINUTOS:-30}
       GATEWAY_USUARIO: ${GATEWAY_USUARIO:-admin}
@@ -91,12 +109,18 @@ services:
       INFERENCIA_TIMEOUT_LEITURA: ${INFERENCIA_TIMEOUT_LEITURA:-3}
       INFERENCIA_TENTATIVAS: ${INFERENCIA_TENTATIVAS:-3}
       INFERENCIA_ESPERA_BASE: ${INFERENCIA_ESPERA_BASE:-0.2}
+      VETORIAL_TIMEOUT_CONEXAO: ${VETORIAL_TIMEOUT_CONEXAO:-1}
+      VETORIAL_TIMEOUT_LEITURA: ${VETORIAL_TIMEOUT_LEITURA:-3}
+      VETORIAL_TENTATIVAS: ${VETORIAL_TENTATIVAS:-3}
+      VETORIAL_ESPERA_BASE: ${VETORIAL_ESPERA_BASE:-0.2}
       DISJUNTOR_LIMITE_FALHAS: ${DISJUNTOR_LIMITE_FALHAS:-3}
       DISJUNTOR_ESPERA_SEGUNDOS: ${DISJUNTOR_ESPERA_SEGUNDOS:-15}
     depends_on:
       redis: {condition: service_healthy}
       # espera o healthcheck do Dockerfile da inferencia (modelo carregado)
       inferencia: {condition: service_healthy}
+      # espera o indice do vetorial pronto (carregado ou indexado)
+      vetorial: {condition: service_healthy}
     restart: unless-stopped
 
   # recebe os spans por otlp na rede interna (4318, ligado por padrao na v2)
@@ -109,6 +133,7 @@ services:
 
 volumes:
   redis-dados:
+  vetorial-dados:
 
-# Observe: os servicos se referenciam pelo NOME (inferencia, redis),
+# Observe: os servicos se referenciam pelo NOME (inferencia, vetorial, redis),
 # nunca por IP fixo. Isso e descoberta de servicos. (Aula 14)

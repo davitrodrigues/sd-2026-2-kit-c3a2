@@ -1,0 +1,71 @@
+# vetorial: armazenamento vetorial. uma replica so: o indice fica num volume
+# ReadWriteOnce, e duas replicas teriam cada uma o seu (o /indexar chegaria
+# so numa delas).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vetorial-dados
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vetorial
+  labels: {app: vetorial}
+spec:
+  replicas: 1
+  # Recreate: o volume RWO nao pode ser montado por dois pods ao mesmo tempo
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: vetorial}
+  template:
+    metadata:
+      labels: {app: vetorial}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001  # o usuario "app" criado no Dockerfile
+        fsGroup: 10001    # sem ele o volume nasce do root e o app nao grava
+      containers:
+        - name: vetorial
+          image: plataforma-ia/vetorial:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - configMapRef: {name: plataforma-config}
+          env:
+            - name: DIR_DADOS  # o mesmo caminho do volume abaixo
+              value: /app/dados
+          volumeMounts:
+            - name: dados
+              mountPath: /app/dados
+          # so recebe trafego depois de carregar ou montar o indice
+          readinessProbe:
+            httpGet: {path: /saude, port: 8002}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /saude, port: 8002}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+      volumes:
+        - name: dados
+          persistentVolumeClaim:
+            claimName: vetorial-dados
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vetorial
+spec:
+  selector: {app: vetorial}
+  ports:
+    - port: 8002
+      targetPort: 8002

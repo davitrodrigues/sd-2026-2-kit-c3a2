@@ -1,5 +1,5 @@
 # rastreio: rastreamento distribuido (Aula 15), manda os spans por otlp para
-# o jaeger; o mesmo arquivo em gateway, inferencia e worker.
+# o jaeger; o mesmo arquivo em todos os servicos.
 #
 # so liga com OTEL_EXPORTER_OTLP_ENDPOINT definido; sem ele (deploy sem
 # jaeger) nada e configurado e todo span vira no-op, sem custo nem erro.

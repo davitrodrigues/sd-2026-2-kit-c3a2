@@ -1,5 +1,6 @@
 # configuracao que nao e segredo (a mesma do .env.example). os servicos se
-# acham pelo NOME do Service (redis, inferencia): descoberta de servicos.
+# acham pelo NOME do Service (redis, inferencia, vetorial): descoberta de
+# servicos.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +12,7 @@ data:
   RESULTADO_TTL_SEGUNDOS: "86400"
   DESCARTE_MAXIMO: "1000"
   URL_INFERENCIA: http://inferencia:8001
+  URL_VETORIAL: http://vetorial:8002
   JWT_EXPIRA_MINUTOS: "30"
   LIMITE_POR_MINUTO: "10"
   LIMITE_LOGIN_POR_MINUTO: "5"
@@ -19,6 +21,10 @@ data:
   INFERENCIA_TIMEOUT_LEITURA: "3"
   INFERENCIA_TENTATIVAS: "3"
   INFERENCIA_ESPERA_BASE: "0.2"
+  VETORIAL_TIMEOUT_CONEXAO: "1"
+  VETORIAL_TIMEOUT_LEITURA: "3"
+  VETORIAL_TENTATIVAS: "3"
+  VETORIAL_ESPERA_BASE: "0.2"
   DISJUNTOR_LIMITE_FALHAS: "3"
   DISJUNTOR_ESPERA_SEGUNDOS: "15"
   WORKER_ESPERA_REDIS_BASE: "1"

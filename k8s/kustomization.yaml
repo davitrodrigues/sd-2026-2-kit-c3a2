@@ -9,5 +9,6 @@ resources:
   - secret.yaml
   - redis.yaml
   - inferencia.yaml
+  - vetorial.yaml
   - worker.yaml
   - gateway.yaml
