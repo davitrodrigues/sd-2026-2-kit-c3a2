@@ -1,0 +1,61 @@
+# redis: fila, resultados e contadores do rate limit. uma replica so (ver
+# "Trade-offs: CAP" no README); o volume guarda o AOF entre reinicios.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-dados
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels: {app: redis}
+spec:
+  replicas: 1
+  # Recreate: o volume RWO nao pode ser montado por dois pods ao mesmo tempo
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: dados
+              mountPath: /data
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+      volumes:
+        - name: dados
+          persistentVolumeClaim:
+            claimName: redis-dados
+---
+# ClusterIP: so visivel dentro do cluster, como o redis fora do compose
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector: {app: redis}
+  ports:
+    - port: 6379
+      targetPort: 6379

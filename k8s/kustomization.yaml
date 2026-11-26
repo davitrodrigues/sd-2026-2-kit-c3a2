@@ -1,0 +1,13 @@
+# aplica a stack inteira de uma vez:  kubectl apply -k k8s/
+# (o equivalente do "docker compose up" no kubernetes)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: plataforma-ia
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - redis.yaml
+  - inferencia.yaml
+  - worker.yaml
+  - gateway.yaml

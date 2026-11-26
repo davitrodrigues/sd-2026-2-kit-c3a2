@@ -1,0 +1,46 @@
+# inferencia: recebe do gateway e enfileira. sem exposicao para fora.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inferencia
+  labels: {app: inferencia}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: inferencia}
+  template:
+    metadata:
+      labels: {app: inferencia}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001  # o usuario "app" criado no Dockerfile
+      containers:
+        - name: inferencia
+          image: plataforma-ia/inferencia:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef: {name: plataforma-config}
+          # so recebe trafego depois de carregar o modelo (o /saude responde)
+          readinessProbe:
+            httpGet: {path: /saude, port: 8001}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /saude, port: 8001}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inferencia
+spec:
+  selector: {app: inferencia}
+  ports:
+    - port: 8001
+      targetPort: 8001

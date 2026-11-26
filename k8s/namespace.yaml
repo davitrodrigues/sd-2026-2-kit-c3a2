@@ -1,0 +1,5 @@
+# tudo da plataforma fica separado do resto do cluster
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: plataforma-ia

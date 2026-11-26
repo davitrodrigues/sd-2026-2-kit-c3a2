@@ -39,7 +39,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [ ] Componente serverless ou na borda
 - [ ] CI/CD publicando automaticamente a cada commit
 - [ ] Painel de metricas
-- [ ] Manifests de Kubernetes
+- [x] Manifests de Kubernetes
 
 ## Antes de entregar
 

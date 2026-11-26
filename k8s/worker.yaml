@@ -1,0 +1,50 @@
+# workers: consomem a mesma fila; mais replicas = mais vazao.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels: {app: worker}
+spec:
+  replicas: 2  # o mesmo padrao de WORKERS no compose
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      # o worker trata o SIGTERM e termina a tarefa atual antes de sair
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: worker
+          image: plataforma-ia/worker:1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: {name: plataforma-config}
+          # sem probe http: o worker nao abre porta, so consome a fila
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+# escala os workers pela CPU (precisa do metrics-server no cluster).
+# escalar pelo tamanho da fila exigiria metrica externa (ex.: KEDA).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

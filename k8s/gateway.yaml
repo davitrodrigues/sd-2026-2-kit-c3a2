@@ -1,0 +1,48 @@
+# gateway: a unica porta de entrada da plataforma.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {app: gateway}
+spec:
+  replicas: 2  # o rate limit fica no redis, entao vale igual nas duas
+  selector:
+    matchLabels: {app: gateway}
+  template:
+    metadata:
+      labels: {app: gateway}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: gateway
+          image: plataforma-ia/gateway:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: {name: plataforma-config}
+            - secretRef: {name: plataforma-segredos}
+          readinessProbe:
+            httpGet: {path: /saude, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /saude, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+# ClusterIP + port-forward no cluster local. para expor de verdade, troque
+# o type para LoadBalancer (nuvem) ou NodePort, ou ponha um Ingress com TLS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector: {app: gateway}
+  ports:
+    - port: 8000
+      targetPort: 8000

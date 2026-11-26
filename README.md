@@ -222,6 +222,35 @@ proteção contra picos.
 
 ---
 
+## Kubernetes (extensão opcional)
+
+A pasta `k8s/` tem os manifests da mesma stack do compose: namespace, ConfigMap,
+Secret, Redis com volume, inferência, workers (com HPA por CPU) e gateway. Feito
+para cluster local (minikube, kind ou o Kubernetes do Docker Desktop):
+
+```bash
+# 1. gere as imagens com os nomes usados nos manifests
+docker build -t plataforma-ia/gateway:1.0 ./gateway
+docker build -t plataforma-ia/inferencia:1.0 ./inferencia
+docker build -t plataforma-ia/worker:1.0 ./worker
+#    minikube: rode antes  eval $(minikube docker-env)
+#    kind:     kind load docker-image plataforma-ia/gateway:1.0 (e as outras)
+
+# 2. TROQUE os valores de k8s/secret.yaml e aplique tudo de uma vez
+kubectl apply -k k8s/
+
+# 3. acesse o gateway (único Service exposto)
+kubectl -n plataforma-ia port-forward svc/gateway 8000:8000
+curl http://localhost:8000/saude
+
+kubectl -n plataforma-ia get pods,hpa    # acompanhar
+kubectl delete -k k8s/                   # remover tudo
+```
+
+O HPA dos workers precisa do `metrics-server` (`minikube addons enable metrics-server`).
+
+---
+
 ## Estrutura do projeto
 
 ```
@@ -235,6 +264,7 @@ sd-2026-2-kit-c3a2/
 ├── deploy/INSTRUCOES.md    # passo a passo do free tier
 ├── Dockerfile.exemplo      # modelo para os demais serviços
 ├── docker-compose.yml      # TAREFA 4 (stack inteira com um comando)
+├── k8s/                    # extensao: manifests de Kubernetes (kubectl apply -k)
 └── TAREFAS.md              # <- comece por aqui
 ```
 
