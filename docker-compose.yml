@@ -5,6 +5,7 @@
 #
 # fluxo: cliente -> gateway (8000, unica porta publica) -> inferencia -> redis
 #        (fila) -> worker(s) -> redis (resultado) -> inferencia -> gateway
+# rastreamento: os tres servicos mandam spans ao jaeger (ui em 127.0.0.1:16686)
 
 # configuracao comum aos servicos que falam com o redis
 # um servico parado some do dns interno do docker, e a consulta pelo nome dele
@@ -20,6 +21,11 @@ x-redis: &redis-env
   # LGPD: prazo de guarda do resultado (s) e tamanho maximo do descarte
   RESULTADO_TTL_SEGUNDOS: ${RESULTADO_TTL_SEGUNDOS:-86400}
   DESCARTE_MAXIMO: ${DESCARTE_MAXIMO:-1000}
+
+# rastreamento (Aula 15): para onde os servicos mandam os spans (otlp/http).
+# "-" e nao ":-" de proposito: definir vazio no .env desliga o rastreamento
+x-otel: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://jaeger:4318}
 
 services:
   redis:
@@ -42,7 +48,8 @@ services:
     <<: *dns-rapido
     # sem "ports": so e acessivel pela rede interna, sempre via gateway
     environment:
-      <<: *redis-env
+      <<: [*redis-env, *otel-env]
+      OTEL_SERVICE_NAME: inferencia
     depends_on:
       redis: {condition: service_healthy}
     restart: unless-stopped
@@ -51,7 +58,8 @@ services:
     build: ./worker
     <<: *dns-rapido
     environment:
-      <<: *redis-env
+      <<: [*redis-env, *otel-env]
+      OTEL_SERVICE_NAME: worker
       WORKER_ESPERA_REDIS_BASE: ${WORKER_ESPERA_REDIS_BASE:-1}
       WORKER_ESPERA_REDIS_MAXIMA: ${WORKER_ESPERA_REDIS_MAXIMA:-30}
     # varios workers dividem a mesma fila (sem porta nem nome fixo, escala)
@@ -66,7 +74,8 @@ services:
     <<: *dns-rapido
     ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
-      <<: *redis-env
+      <<: [*redis-env, *otel-env]
+      OTEL_SERVICE_NAME: gateway
       URL_INFERENCIA: ${URL_INFERENCIA:-http://inferencia:8001}
       JWT_SEGREDO: ${JWT_SEGREDO:-troque-este-segredo}
       JWT_EXPIRA_MINUTOS: ${JWT_EXPIRA_MINUTOS:-30}
@@ -84,6 +93,14 @@ services:
       redis: {condition: service_healthy}
       # espera o healthcheck do Dockerfile da inferencia (modelo carregado)
       inferencia: {condition: service_healthy}
+    restart: unless-stopped
+
+  # recebe os spans por otlp na rede interna (4318, ligado por padrao na v2)
+  # e guarda em memoria; a interface web fica so no localhost da maquina.
+  # ninguem depende dele: com o jaeger fora a plataforma roda igual
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    ports: ["127.0.0.1:${JAEGER_PORTA:-16686}:16686"]
     restart: unless-stopped
 
 volumes:

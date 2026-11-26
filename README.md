@@ -95,6 +95,9 @@ docker compose pause inferencia   # trava a inferência
 curl http://localhost:8000/saude  # {"disjuntor_inferencia":"aberto"}
 docker compose unpause inferencia # após 15s o disjuntor testa e fecha sozinho
 
+# 6g. Rastreamento (veja a seção "Observabilidade" abaixo): faça um /predict e
+#     abra http://127.0.0.1:16686 -> Service "gateway" -> Find Traces
+
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
 
@@ -131,6 +134,48 @@ Decisões e limites:
 
 ---
 
+## Observabilidade
+
+Rastreamento distribuído com **OpenTelemetry**, exportado por OTLP para o **Jaeger**
+(sobe junto no compose). Um pedido vira **um trace só**, do gateway até o worker,
+passando pela fila.
+
+Para ver: faça um `POST /predict` (passo 6), abra **http://127.0.0.1:16686**, escolha
+o serviço `gateway` e clique em *Find Traces*. O trace do `POST /predict` tem esta
+árvore, com spans dos três serviços e o mesmo trace ID:
+
+```
+gateway     POST /predict                (SERVER)
+gateway       POST                       (CLIENT: requests -> inferencia)
+inferencia      POST /predict            (SERVER)
+inferencia        enfileirar tarefas     (PRODUCER)
+worker              processar tarefas    (CONSUMER, atributo tarefa.tentativa)
+worker                modelo prever      (INTERNAL)
+```
+
+- **Gateway → inferência:** o contexto vai no header HTTP `traceparent`, pela
+  instrumentação automática do FastAPI e do `requests`.
+- **Pela fila:** o Redis não tem header, só guarda a mensagem. Por isso a inferência
+  grava o `traceparent` **dentro da mensagem** (campo `rastreio`) e o worker abre o
+  span de consumo como filho dele. Na retentativa a mensagem volta para a fila com
+  o mesmo campo, então cada tentativa aparece no mesmo trace, marcada com erro.
+- **Log ↔ trace:** as linhas de log dos três serviços terminam em `trace_id=...`, o
+  mesmo ID que se busca no Jaeger (ou em `/api/v3/traces/<trace_id>`).
+- **Só liga com `OTEL_EXPORTER_OTLP_ENDPOINT`.** O compose aponta para
+  `http://jaeger:4318`. Na nuvem, sem Jaeger, basta não definir a variável: nada é
+  configurado e o serviço roda igual. Com o Jaeger fora do ar, os spans são
+  descartados com um aviso só no log. A exportação é em lote e em segundo plano,
+  então nenhuma requisição espera por ela.
+- **LGPD:** nenhum span leva texto, senha, token ou o IP de quem chamou. A
+  instrumentação automática grava o IP, a porta e o navegador do cliente
+  (`net.peer.ip`, `http.user_agent` e os equivalentes novos `client.address`,
+  `user_agent.original`). Um filtro no exportador tira essas chaves antes de o span
+  sair do processo. A fila só manda o id da tarefa, e o erro do modelo entra só com
+  o tipo, sem a mensagem. O `/saude` não é rastreado, porque o healthcheck só faria
+  ruído.
+
+---
+
 ## Conformidade (LGPD)
 
 A plataforma classifica o sentimento de um texto. O texto é enviado pelo próprio
@@ -145,7 +190,8 @@ o sistema trata o texto como dado pessoal e guarda o mínimo pelo menor tempo.
 | Usuário e senha do `/login` | Autenticar | Só na memória durante a requisição | Não são guardados nem logados. A comparação é em tempo constante |
 | Usuário (dentro do token JWT) | Identificar quem chama e aplicar a cota | Só no token, que fica com o cliente; o servidor não guarda tokens | `JWT_EXPIRA_MINUTOS` (padrão 30 min) |
 | IP do cliente / usuário no rate limit | Limitar tentativas de login e chamadas por minuto | Redis, como **apelido HMAC-SHA256 com segredo** (não dá para voltar ao IP) | 60 s (a chave expira com a janela) |
-| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada e tempo; **nunca texto, senha, token ou IP** (o access log do uvicorn está desligado no gateway porque registrava o IP) |
+| Rastreamento (spans no Jaeger) | Depurar e medir a latência entre os serviços | Memória do Jaeger, interface só em 127.0.0.1 | Até o Jaeger reiniciar (sem volume). Têm rota, status, tempos e id da tarefa; **nunca texto, senha, token ou IP do cliente** (filtrados no exportador) |
+| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada, tempo e `trace_id`; **nunca texto, senha, token ou IP** (o access log do uvicorn está desligado no gateway porque registrava o IP) |
 
 Princípios aplicados (art. 6º da LGPD):
 - **Finalidade e necessidade:** o texto só é usado para a classificação. Ele não
@@ -258,6 +304,7 @@ sd-2026-2-kit-c3a2/
 ├── gateway/
 │   ├── app.py              # TAREFAS 1 e 2 (JWT e rate limit)
 │   ├── resiliencia.py      # TAREFA 6 (retentativa e circuit breaker)
+│   ├── rastreio.py         # TAREFA 7 (rastreamento; igual em inferencia/ e worker/)
 │   └── Dockerfile          # TAREFA 3
 ├── inferencia/             # API de inferência do C1.A2 + Dockerfile (TAREFA 3)
 ├── worker/                 # worker de fila do C1.A2 + Dockerfile (TAREFA 3)

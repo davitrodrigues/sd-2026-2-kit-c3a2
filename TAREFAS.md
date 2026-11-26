@@ -22,7 +22,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 - [x] **6. Resiliencia**
       Tempo-limite, retentativa com espera progressiva e circuit breaker. (Aula 11)
 
-- [ ] **7. Observabilidade**
+- [x] **7. Observabilidade**
       Rastreamento distribuido cobrindo gateway -> fila -> worker. (Aula 15)
 
 - [ ] **8. HTTPS** no servico publicado. (Aula 16)

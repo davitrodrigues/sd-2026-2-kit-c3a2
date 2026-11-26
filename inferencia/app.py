@@ -3,6 +3,7 @@
 #
 # rodar: uvicorn app:app --port 8001
 # ambiente: REDIS_URL
+# opcional: OTEL_EXPORTER_OTLP_ENDPOINT liga o rastreamento (jaeger)
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import fila
+import rastreio
 from log import registrar_requisicao
 from modelo import carregar_modelo
 
@@ -31,6 +33,9 @@ async def ciclo_de_vida(_app: FastAPI):
 
 
 app = FastAPI(title="Servico de Inferencia - C3.A2", lifespan=ciclo_de_vida)
+# continua o trace que chega do gateway pelo header traceparent
+if rastreio.configurar("inferencia"):
+    rastreio.instrumentar_fastapi(app)
 
 
 class Entrada(BaseModel):

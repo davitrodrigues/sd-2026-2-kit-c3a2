@@ -3,6 +3,7 @@
 #
 # rodar: uvicorn app:app --port 8000
 # obrigatorias no ambiente: JWT_SEGREDO, GATEWAY_USUARIO e GATEWAY_SENHA
+# opcional: OTEL_EXPORTER_OTLP_ENDPOINT liga o rastreamento (jaeger)
 import hashlib
 import hmac
 import logging
@@ -16,8 +17,10 @@ import redis
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from pydantic import BaseModel
 
+import rastreio
 from resiliencia import (CircuitBreaker, CircuitoAberto, FalhaTransitoria,
                          com_retentativa)
 
@@ -33,6 +36,10 @@ def _env_obrigatoria(nome: str) -> str:
 
 
 app = FastAPI(title="Gateway - C3.A2")
+# o requests instrumentado leva o traceparent no header ate a inferencia
+if rastreio.configurar("gateway"):
+    rastreio.instrumentar_fastapi(app)
+    RequestsInstrumentor().instrument()
 URL_INFERENCIA = os.getenv("URL_INFERENCIA", "http://localhost:8001")
 
 # resiliencia da chamada a inferencia (Aula 11). tempo-limite separado: abrir
@@ -160,7 +167,7 @@ async def registrar(request: Request, call_next):
     resposta = await call_next(request)
     ms = (time.time() - inicio) * 1000
     print(f"[gateway] {request.method} {request.url.path} "
-          f"-> {resposta.status_code} ({ms:.1f}ms)")
+          f"-> {resposta.status_code} ({ms:.1f}ms){rastreio.para_log()}")
     return resposta
 
 

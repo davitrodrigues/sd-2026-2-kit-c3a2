@@ -4,6 +4,7 @@
 #
 # rodar: python worker.py
 # ambiente: REDIS_URL
+# opcional: OTEL_EXPORTER_OTLP_ENDPOINT liga o rastreamento (jaeger)
 # escala horizontal: docker compose up --scale worker=3
 import os
 import random
@@ -11,8 +12,10 @@ import signal
 import time
 
 import redis
+from opentelemetry import trace
 
 import fila
+import rastreio
 from log import registrar_requisicao
 from modelo import carregar_modelo
 
@@ -22,6 +25,7 @@ ESPERA_REDIS_BASE = float(os.getenv("WORKER_ESPERA_REDIS_BASE", "1"))
 ESPERA_REDIS_MAXIMA = float(os.getenv("WORKER_ESPERA_REDIS_MAXIMA", "30"))
 
 _rodando = True
+_tracer = trace.get_tracer("worker")
 
 
 # o docker stop manda SIGTERM; termina a tarefa atual e sai, sem esperar o
@@ -42,7 +46,12 @@ def _dormir(segundos: float) -> None:
 def processar(modelo, tarefa: dict) -> None:
     inicio = time.perf_counter()
     try:
-        resultado = modelo.prever(tarefa["texto"])
+        # span proprio para o tempo do modelo aparecer separado no trace; sem
+        # registrar a excecao, cuja mensagem poderia citar o texto (lgpd)
+        with _tracer.start_as_current_span(
+                "modelo prever", record_exception=False,
+                set_status_on_exception=False):
+            resultado = modelo.prever(tarefa["texto"])
         # o cliente ja tem o texto; guardar de novo no redis seria dado
         # pessoal sem necessidade (minimizacao, LGPD)
         resultado.pop("texto", None)
@@ -56,6 +65,9 @@ def processar(modelo, tarefa: dict) -> None:
               f"(entrega no maximo uma vez)", flush=True)
         raise
     except Exception as erro:  # noqa: BLE001
+        # o span de consumo fica vermelho no jaeger, so com o tipo do erro
+        trace.get_current_span().set_status(trace.StatusCode.ERROR,
+                                            type(erro).__name__)
         tarefa["tentativas"] = tarefa.get("tentativas", 0) + 1
         if tarefa["tentativas"] < MAX_TENTATIVAS:
             print(f"[worker] ERRO em {tarefa['id']}: {erro} "
@@ -80,6 +92,7 @@ def main():
     signal.signal(signal.SIGTERM, _parar)
     signal.signal(signal.SIGINT, _parar)
 
+    rastreio.configurar("worker")
     print("[worker] carregando modelo...", flush=True)
     modelo = carregar_modelo()
     print("[worker] pronto. aguardando tarefas", flush=True)
@@ -90,7 +103,8 @@ def main():
             # timeout curto para checar _rodando com frequencia
             tarefa = fila.proxima_tarefa()
             if tarefa is not None:
-                processar(modelo, tarefa)
+                with fila.consumindo(tarefa):
+                    processar(modelo, tarefa)
         except redis.RedisError as erro:
             # em vez de morrer (e o container reiniciar em loop), espera cada
             # vez mais, com jitter para os workers nao voltarem todos juntos

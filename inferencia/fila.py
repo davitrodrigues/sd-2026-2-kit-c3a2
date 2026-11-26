@@ -11,8 +11,10 @@ se o redis continuar fora depois disso.
 import json
 import os
 import uuid
+from contextlib import contextmanager
 
 import redis
+from opentelemetry import propagate, trace
 from redis.backoff import ExponentialBackoff
 from redis.retry import Retry
 
@@ -43,6 +45,8 @@ ESPERA_FILA = 2  # segundos que o blpop do worker espera por uma tarefa
 
 _cliente = None
 _cliente_bloqueante = None
+# vira no-op sozinho se o rastreamento estiver desligado
+_tracer = trace.get_tracer("fila")
 
 
 def _novo_cliente(timeout_leitura: float):
@@ -81,13 +85,43 @@ def enfileirar(texto: str, tarefa_id: str | None = None) -> str:
     Com o mesmo tarefa_id, chamar de novo nao enfileira outra vez (idempotente).
     """
     tarefa_id = tarefa_id or str(uuid.uuid4())
-    cliente().eval(
-        _ENFILEIRAR_UMA_VEZ, 2,
-        PREFIXO_RESULTADO + tarefa_id, FILA_TAREFAS,
-        json.dumps({"status": "na_fila"}),
-        json.dumps({"id": tarefa_id, "texto": texto}),
-        RESULTADO_TTL_SEGUNDOS)
+    with _tracer.start_as_current_span(
+            f"enfileirar {FILA_TAREFAS}", kind=trace.SpanKind.PRODUCER,
+            attributes=_atributos(tarefa_id, "publish")):
+        # o redis nao tem header como o http, entao o contexto do trace
+        # (traceparent) viaja dentro da propria mensagem
+        rastreio = {}
+        propagate.inject(rastreio)  # fica vazio com o rastreamento desligado
+        cliente().eval(
+            _ENFILEIRAR_UMA_VEZ, 2,
+            PREFIXO_RESULTADO + tarefa_id, FILA_TAREFAS,
+            json.dumps({"status": "na_fila"}),
+            json.dumps({"id": tarefa_id, "texto": texto,
+                        "rastreio": rastreio}),
+            RESULTADO_TTL_SEGUNDOS)
     return tarefa_id
+
+
+# atributos de mensageria do span, so com o id: o texto nunca vai (lgpd).
+def _atributos(tarefa_id: str, operacao: str) -> dict:
+    return {"messaging.system": "redis",
+            "messaging.destination.name": FILA_TAREFAS,
+            "messaging.operation.type": operacao,
+            "messaging.message.id": tarefa_id}
+
+
+# roda o bloco num span de consumo filho do contexto que veio na mensagem,
+# e assim o worker entra no mesmo trace do pedido que o gateway recebeu.
+@contextmanager
+def consumindo(tarefa: dict):
+    # mensagem sem o campo (de antes do rastreio) so comeca um trace novo
+    contexto = propagate.extract(tarefa.get("rastreio") or {})
+    atributos = _atributos(tarefa["id"], "process")
+    atributos["tarefa.tentativa"] = tarefa.get("tentativas", 0) + 1
+    with _tracer.start_as_current_span(
+            f"processar {FILA_TAREFAS}", context=contexto,
+            kind=trace.SpanKind.CONSUMER, attributes=atributos):
+        yield
 
 
 def proxima_tarefa():
@@ -110,6 +144,7 @@ def buscar_resultado(tarefa_id: str):
 
 def reenfileirar(tarefa: dict) -> None:
     """Devolve a tarefa para o fim da fila, para o worker tentar de novo."""
+    # o campo rastreio vai junto, e a nova tentativa cai no mesmo trace
     cliente().rpush(FILA_TAREFAS, json.dumps(tarefa))
 
 
