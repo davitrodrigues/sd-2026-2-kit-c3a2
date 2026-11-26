@@ -30,8 +30,10 @@ x-otel: &otel-env
 services:
   redis:
     image: redis:7-alpine
-    # aof: a fila e os resultados sobrevivem a um restart do redis
-    command: ["redis-server", "--appendonly", "yes"]
+    # snapshot do estado atual a cada 60s, e nao aof, que guardaria em disco o
+    # texto de toda tarefa ja processada (lgpd); numa queda brusca perde ate
+    # 60s de fila
+    command: ["redis-server", "--appendonly", "no", "--save", "60", "1"]
     volumes:
       - redis-dados:/data
     # so no localhost da maquina, para depurar; fora dela o redis nao aparece
@@ -62,6 +64,7 @@ services:
       OTEL_SERVICE_NAME: worker
       WORKER_ESPERA_REDIS_BASE: ${WORKER_ESPERA_REDIS_BASE:-1}
       WORKER_ESPERA_REDIS_MAXIMA: ${WORKER_ESPERA_REDIS_MAXIMA:-30}
+      WORKER_MAX_TENTATIVAS: ${WORKER_MAX_TENTATIVAS:-3}
     # varios workers dividem a mesma fila (sem porta nem nome fixo, escala)
     deploy:
       replicas: ${WORKERS:-2}
@@ -83,6 +86,7 @@ services:
       GATEWAY_SENHA: ${GATEWAY_SENHA:-troque-esta-senha}
       LIMITE_POR_MINUTO: ${LIMITE_POR_MINUTO:-10}
       LIMITE_LOGIN_POR_MINUTO: ${LIMITE_LOGIN_POR_MINUTO:-5}
+      LIMITE_REDIS_TIMEOUT: ${LIMITE_REDIS_TIMEOUT:-0.5}
       INFERENCIA_TIMEOUT_CONEXAO: ${INFERENCIA_TIMEOUT_CONEXAO:-1}
       INFERENCIA_TIMEOUT_LEITURA: ${INFERENCIA_TIMEOUT_LEITURA:-3}
       INFERENCIA_TENTATIVAS: ${INFERENCIA_TENTATIVAS:-3}

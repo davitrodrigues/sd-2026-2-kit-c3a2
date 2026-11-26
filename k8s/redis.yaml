@@ -1,5 +1,5 @@
 # redis: fila, resultados e contadores do rate limit. uma replica so (ver
-# "Trade-offs: CAP" no README); o volume guarda o AOF entre reinicios.
+# "Trade-offs: CAP" no README); o volume guarda o snapshot entre reinicios.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -28,7 +28,8 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["redis-server", "--appendonly", "yes"]
+          # snapshot a cada 60s e nao aof, que guardaria o texto (lgpd)
+          args: ["redis-server", "--appendonly", "no", "--save", "60", "1"]
           ports:
             - containerPort: 6379
           volumeMounts:

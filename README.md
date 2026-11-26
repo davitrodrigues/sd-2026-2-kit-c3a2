@@ -22,52 +22,73 @@ para entrevista de emprego.
 
 ## Como começar
 
+Só precisa de **Git** e **Docker** (com o Compose): os serviços, o Redis e o Jaeger
+rodam em containers, então não é preciso instalar Python nem criar ambiente virtual.
+
 ```bash
-# 1. Clone o kit e entre na pasta
-git clone https://github.com/howardroatti/sd-2026-2-kit-c3a2.git
+# 1. Clone o repositório e entre na pasta
+git clone https://github.com/davitrodrigues/sd-2026-2-kit-c3a2.git
 cd sd-2026-2-kit-c3a2
 
-# 2. Crie e ative o ambiente virtual
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
-
-# 3. Instale as dependências
-pip install -r requirements.txt
-```
-
-```bash
-# 4. Copie o arquivo de ambiente
+# 2. Copie o arquivo de ambiente
 cp .env.example .env
 
-# 5. Suba a stack inteira com UM comando
-docker compose up --build
+# 3. Suba a stack inteira com UM comando. O -d devolve o terminal; sem ele,
+#    os logs ficam presos na tela e os testes abaixo vão em OUTRO terminal
+docker compose up --build -d
+docker compose logs -f   # opcional: acompanha os logs (Ctrl+C sai só do log)
 
-# 6. Teste pelo gateway (nunca pelos serviços diretamente)
+# 4. Teste pelo gateway (nunca pelos serviços diretamente)
 curl http://localhost:8000/saude        # pública: é o healthcheck do deploy
 
-# 6a. Faça login com GATEWAY_USUARIO / GATEWAY_SENHA do seu .env
+# 4a. Faça login com GATEWAY_USUARIO / GATEWAY_SENHA do seu .env
 curl -X POST http://localhost:8000/login \
   -H "Content-Type: application/json" \
   -d '{"usuario":"admin","senha":"troque-esta-senha"}'
 # -> {"access_token":"eyJ...","token_type":"bearer","expira_em":1800}
 
-# 6b. Use o access_token nas rotas protegidas (sem ele a resposta é 401)
+# 4b. Use o access_token nas rotas protegidas (sem ele a resposta é 401)
 TOKEN="cole-aqui-o-access_token"
 curl -X POST http://localhost:8000/predict \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
 # -> 202 {"id":"563b1b0b-..."}   (assíncrono: a tarefa foi para a fila)
 
-# 6b'. Consulte o resultado com o id (o worker processa em segundo plano)
+# 4b'. Consulte o resultado com o id (o worker processa em segundo plano)
 curl http://localhost:8000/resultado/563b1b0b-... -H "Authorization: Bearer $TOKEN"
 # -> {"sentimento":"positivo","confianca":0.54,"status":"pronto",...}
 #    status "na_fila" enquanto não terminou; 404 se o id não existir
 # Pelo navegador: http://localhost:8000/docs -> botão "Authorize" -> cole o token
+```
 
-# 6c. Limite por minuto: LIMITE_POR_MINUTO chamadas por usuário do token e
+**No Windows (PowerShell):** os `curl` acima são de bash. No PowerShell 5.1, `curl` é
+apelido do `Invoke-WebRequest`, e o `curl.exe` estraga as aspas do JSON (a resposta
+vira 422). O mesmo teste (passos 4 a 4b') com `Invoke-RestMethod`:
+
+```powershell
+# 127.0.0.1 e não localhost: no Windows o localhost tenta o IPv6 antes e atrasa
+$base = "http://127.0.0.1:8000"
+Invoke-RestMethod "$base/saude"
+
+# 4a. login com GATEWAY_USUARIO / GATEWAY_SENHA do .env, guardando o token
+$login = @{ usuario = "admin"; senha = "troque-esta-senha" } | ConvertTo-Json
+$token = (Invoke-RestMethod "$base/login" -Method Post `
+  -ContentType "application/json" -Body $login).access_token
+$auth = @{ Authorization = "Bearer $token" }
+
+# 4b. envia o texto (charset=utf-8 para o acento chegar certo)
+$corpo = @{ texto = "serviço excelente" } | ConvertTo-Json
+$id = (Invoke-RestMethod "$base/predict" -Method Post -Headers $auth `
+  -ContentType "application/json; charset=utf-8" -Body $corpo).id
+
+# 4b'. consulta o resultado (o worker processa em segundo plano)
+Start-Sleep -Seconds 1
+Invoke-RestMethod "$base/resultado/$id" -Headers $auth | Format-List
+# -> sentimento : positivo / confianca : ... / status : pronto / tempo_ms : ...
+```
+
+```bash
+# 4c. Limite por minuto: LIMITE_POR_MINUTO chamadas por usuário do token e
 #     LIMITE_LOGIN_POR_MINUTO tentativas de /login por IP. Passou disso, a
 #     resposta é 429 com o header Retry-After (segundos até liberar).
 for i in 1 2 3 4 5 6; do
@@ -76,29 +97,30 @@ for i in 1 2 3 4 5 6; do
 done
 # -> 401 até estourar o limite do minuto e depois 429
 
-# 6d. Cada serviço tem o seu Dockerfile (python:3.12-slim, usuário não-root).
+# 4d. Cada serviço tem o seu Dockerfile (python:3.12-slim, usuário não-root).
 #     O modelo é treinado no build, então a imagem já sobe pronta.
 docker compose ps        # gateway e inferencia aparecem como (healthy)
 docker compose up -d --scale worker=3   # mais workers dividindo a fila
 
-# 6e. O compose sobe redis -> inferencia -> gateway na ordem certa (espera o
+# 4e. O compose sobe redis -> inferencia -> gateway na ordem certa (espera o
 #     healthcheck de cada um) e WORKERS réplicas do worker (padrão 2).
 #     Só o gateway tem porta pública; inferencia e worker ficam na rede interna
 #     e o redis só em 127.0.0.1. Tudo vem do .env (veja .env.example).
 docker compose down      # para tudo (os dados do redis ficam no volume)
 docker compose down -v   # para tudo e apaga o volume do redis
 
-# 6f. Resiliência (veja a seção "Resiliência" abaixo). Para ver funcionando:
+# 4f. Resiliência (veja a seção "Resiliência" abaixo). Para ver funcionando:
 docker compose pause inferencia   # trava a inferência
 #  -> 3 pedidos seguidos: 503 após ~9s cada (tempo-limite + 3 tentativas)
-#  -> 4º pedido: 503 na hora com Retry-After (disjuntor aberto)
+#  -> 4º pedido: 503 na hora (disjuntor aberto)
+#  -> todo 503 vem com Retry-After (segundos para tentar de novo)
 curl http://localhost:8000/saude  # {"disjuntor_inferencia":"aberto"}
-docker compose unpause inferencia # após 15s o disjuntor testa e fecha sozinho
+docker compose unpause inferencia # após 15s, o próximo pedido testa e fecha o disjuntor
 
-# 6g. Rastreamento (veja a seção "Observabilidade" abaixo): faça um /predict e
+# 4g. Rastreamento (veja a seção "Observabilidade" abaixo): faça um /predict e
 #     abra http://127.0.0.1:16686 -> Service "gateway" -> Find Traces
 
-# 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
+# 5. Publique na nuvem seguindo deploy/INSTRUCOES.md
 ```
 
 ---
@@ -108,13 +130,13 @@ docker compose unpause inferencia # após 15s o disjuntor testa e fecha sozinho
 | Onde | Mecanismo | Padrão (`.env`) |
 |---|---|---|
 | gateway → inferência | **tempo-limite** separado para conectar e para ler | `INFERENCIA_TIMEOUT_CONEXAO=1`, `INFERENCIA_TIMEOUT_LEITURA=3` (s) |
-| gateway → inferência | **retentativa com espera progressiva** (0,2 s, 0,4 s… com jitter), só em falha transitória: rede, tempo-limite e 5xx. Erro 4xx não se repete | `INFERENCIA_TENTATIVAS=3`, `INFERENCIA_ESPERA_BASE=0.2` |
+| gateway → inferência | **retentativa com espera progressiva** (0,2 s, 0,4 s… com jitter), só em falha transitória: rede, tempo-limite e 5xx. Erro 4xx não se repete. Esgotadas as tentativas, responde 503 com `Retry-After`: o valor que a inferência pediu ou, se ela não mandou (estava fora do ar), o `DISJUNTOR_ESPERA_SEGUNDOS` | `INFERENCIA_TENTATIVAS=3`, `INFERENCIA_ESPERA_BASE=0.2` |
 | gateway → inferência | **circuit breaker** por fora das tentativas: abre após N falhas seguidas e responde 503 na hora com `Retry-After`; depois da espera deixa uma chamada de teste passar e fecha se ela der certo. Estado em `GET /saude` | `DISJUNTOR_LIMITE_FALHAS=3`, `DISJUNTOR_ESPERA_SEGUNDOS=15` |
 | gateway → inferência | **idempotência**: o gateway gera o id da tarefa e a inferência só enfileira se o id ainda não existe (script Lua atômico no Redis), então repetir um `POST /predict` não duplica a tarefa | — |
 | inferência / worker → Redis | tempo-limite curto e retentativa no próprio cliente Redis. Com o Redis fora, a inferência responde **503** (e não 500), que o gateway trata como falha transitória | `REDIS_TIMEOUT=1`, `REDIS_TENTATIVAS=1` |
 | worker → Redis | com o Redis fora, o worker **não cai**: espera 1, 2, 4… s (teto 30 s, com jitter) e retoma sozinho quando ele volta | `WORKER_ESPERA_REDIS_BASE=1`, `WORKER_ESPERA_REDIS_MAXIMA=30` |
-| worker | falha na inferência: até 3 tentativas e depois fila de descarte (dead-letter, do C1.A2) | — |
-| gateway → Redis (rate limit) | *fail-open*: se o Redis cair, o limite deixa passar em vez de derrubar o gateway | — |
+| worker | falha na inferência: até N tentativas e depois fila de descarte (dead-letter, do C1.A2) | `WORKER_MAX_TENTATIVAS=3` |
+| gateway → Redis (rate limit) | *fail-open*: se o Redis cair, o limite deixa passar em vez de derrubar o gateway. Tempo-limite menor que o `REDIS_TIMEOUT`, porque com o Redis fora toda requisição paga essa espera | `LIMITE_REDIS_TIMEOUT=0.5` (s) |
 | todos | `restart: unless-stopped` e healthchecks no compose | — |
 
 Decisões e limites:
@@ -140,7 +162,7 @@ Rastreamento distribuído com **OpenTelemetry**, exportado por OTLP para o **Jae
 (sobe junto no compose). Um pedido vira **um trace só**, do gateway até o worker,
 passando pela fila.
 
-Para ver: faça um `POST /predict` (passo 6), abra **http://127.0.0.1:16686**, escolha
+Para ver: faça um `POST /predict` (passo 4b), abra **http://127.0.0.1:16686**, escolha
 o serviço `gateway` e clique em *Find Traces*. O trace do `POST /predict` tem esta
 árvore, com spans dos três serviços e o mesmo trace ID:
 
@@ -184,22 +206,27 @@ o sistema trata o texto como dado pessoal e guarda o mínimo pelo menor tempo.
 
 | Dado | Finalidade | Onde fica | Por quanto tempo |
 |---|---|---|---|
-| Texto enviado no `/predict` | Classificar o sentimento (o único motivo de o serviço existir) | Na fila do Redis, só até um worker pegar a tarefa | Segundos (até ser consumido). **Não vai para o log** (só o tamanho) e **não fica no resultado** |
+| Texto enviado no `/predict` | Classificar o sentimento (o único motivo de o serviço existir) | Na fila do Redis, só até um worker pegar a tarefa | Segundos (até ser consumido). Se um snapshot do Redis pegar a tarefa ainda na fila, ela fica no disco até o snapshot seguinte (~60 s). **Não vai para o log** (só o tamanho) e **não fica no resultado** |
 | Resultado (`sentimento`, `confianca`, `status`) | Devolver a resposta no `GET /resultado/{id}` | Redis, chave `resultado:{id}` | `RESULTADO_TTL_SEGUNDOS` (padrão **24 h**); depois o Redis apaga sozinho |
-| Tarefa que falhou 3 vezes (fila de descarte) | Investigar o erro | Redis, `tarefas:descarte` | Só **id, tentativas e mensagem de erro**, sem o texto. No máximo `DESCARTE_MAXIMO` itens (padrão 1000); os mais antigos saem primeiro |
+| Tarefa que esgotou as tentativas (`WORKER_MAX_TENTATIVAS`, padrão 3) na fila de descarte | Investigar o erro | Redis, `tarefas:descarte` | Só **id, tentativas e mensagem de erro**, sem o texto. No máximo `DESCARTE_MAXIMO` itens (padrão 1000); os mais antigos saem primeiro |
 | Usuário e senha do `/login` | Autenticar | Só na memória durante a requisição | Não são guardados nem logados. A comparação é em tempo constante |
 | Usuário (dentro do token JWT) | Identificar quem chama e aplicar a cota | Só no token, que fica com o cliente; o servidor não guarda tokens | `JWT_EXPIRA_MINUTOS` (padrão 30 min) |
 | IP do cliente / usuário no rate limit | Limitar tentativas de login e chamadas por minuto | Redis, como **apelido HMAC-SHA256 com segredo** (não dá para voltar ao IP) | 60 s (a chave expira com a janela) |
 | Rastreamento (spans no Jaeger) | Depurar e medir a latência entre os serviços | Memória do Jaeger, interface só em 127.0.0.1 | Até o Jaeger reiniciar (sem volume). Têm rota, status, tempos e id da tarefa; **nunca texto, senha, token ou IP do cliente** (filtrados no exportador) |
-| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada, tempo e `trace_id`; **nunca texto, senha, token ou IP** (o access log do uvicorn está desligado no gateway porque registrava o IP) |
+| Logs dos serviços | Operação e depuração | Saída padrão do container | O que a plataforma de hospedagem guardar. Têm método, rota, status, id da tarefa, tamanho da entrada, tempo e `trace_id`; **nunca texto, senha, token ou IP** (o access log do uvicorn, que grava o IP de quem chama, está desligado no gateway e na inferência) |
 
 Princípios aplicados (art. 6º da LGPD):
 - **Finalidade e necessidade:** o texto só é usado para a classificação. Ele não
   serve para treinar o modelo, que já vem pronto do build, e não é compartilhado
   com terceiros. Nenhuma chamada sai para fora da rede interna.
 - **Minimização:** o resultado não repete o texto e a fila de descarte não o guarda.
-- **Prazo de retenção:** tudo no Redis tem TTL. O volume do Redis (AOF) mantém só o
-  que ainda não expirou.
+- **Prazo de retenção:** o resultado e os contadores do rate limit têm TTL; a
+  tarefa sai da fila quando um worker a pega; a fila de descarte, que não tem o
+  texto, é limitada por quantidade (`DESCARTE_MAXIMO`), não por tempo. No disco, o
+  Redis guarda só um **snapshot do estado atual**, refeito a cada 60 s quando algo
+  mudou (`--save 60 1`, sem AOF): tarefa já processada some do snapshot seguinte.
+  O AOF ficou desligado de propósito: ele registra cada escrita e guardaria em
+  disco o texto de toda tarefa, mesmo depois de processada.
 - **Segurança:** só o gateway é exposto; o Redis, a inferência e o worker ficam na
   rede interna. As rotas exigem token e os segredos vêm do `.env`, que não vai para
   o git. Na nuvem o tráfego deve passar por HTTPS (tarefa 8).
@@ -229,6 +256,7 @@ para de aceitar trabalho. Cada parte escolhe um lado de propósito:
 | Circuit breaker | **A**, com estado local de cada réplica do gateway | Não depende de ninguém para decidir. As réplicas podem discordar por alguns segundos, e isso é aceitável |
 | Resultado | **Consistência eventual**: o `POST /predict` responde 202 e o resultado aparece depois | É o preço da fila assíncrona, que absorve picos e deixa escalar os workers |
 | Worker | **No máximo uma entrega**: a tarefa sai da fila no `BLPOP` | Mais simples. Pelo menos uma entrega pediria `BLMOVE` + lista de processamento (ver Resiliência) |
+| Persistência do Redis | **Privacidade acima de durabilidade**: snapshot a cada 60 s, sem AOF | O AOF guardaria em disco o texto de toda tarefa (ver LGPD). O custo: numa queda brusca do Redis (processo morto, máquina desligada) perde-se o que mudou desde o último snapshot, **até ~60 s de tarefas na fila** e de resultados. Num desligamento normal (`docker compose down`) o Redis grava o snapshot antes de sair e não perde nada |
 
 Para tolerar a queda do Redis, o próximo passo seria Redis com réplica + Sentinel
 (ou um Redis gerenciado). Aí entra o trade-off clássico: a replicação do Redis é
@@ -352,8 +380,10 @@ o arquivo e a aula de referência de cada um.
 
 **Preciso saber machine learning?** Não. O modelo já está pronto e você só chama uma função.
 
-**E se eu não tiver internet no laboratório?** Tudo neste kit funciona offline. O modelo é
-treinado localmente e o cliente de LLM tem modo simulado.
+**E se eu não tiver internet no laboratório?** Só o primeiro `docker compose up --build`
+precisa de internet, para baixar as imagens e as dependências. Depois disso tudo roda
+offline: o modelo é treinado no build, com uma base embutida, e nenhum serviço chama
+API externa.
 
 **Posso trocar a linguagem?** O kit é em Python porque é o ecossistema usado nas aulas.
 Se quiser usar outra linguagem, converse com o professor antes.

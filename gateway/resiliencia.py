@@ -13,7 +13,11 @@ log = logging.getLogger("uvicorn.error")
 
 # falha que vale a pena tentar de novo: rede, tempo-limite ou 5xx.
 class FalhaTransitoria(Exception):
-    pass
+
+    # retry_after e o que o servico pediu para esperar, quando ele disse.
+    def __init__(self, mensagem="", retry_after=None):
+        super().__init__(mensagem)
+        self.retry_after = retry_after
 
 
 # erro de quando o disjuntor recusa a chamada; diz quanto falta para o teste.

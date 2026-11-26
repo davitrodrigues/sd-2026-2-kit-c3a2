@@ -24,4 +24,6 @@ EXPOSE 8001
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/saude', timeout=2)" || exit 1
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
+# sem o access log do uvicorn: ele grava o ip de quem chama (LGPD);
+# o log.py ja registra id, tamanho da entrada e tempo
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"]

@@ -62,11 +62,14 @@ JWT_ALGORITMO = "HS256"
 LIMITE_POR_MINUTO = int(os.getenv("LIMITE_POR_MINUTO", "10"))
 LIMITE_LOGIN_POR_MINUTO = int(os.getenv("LIMITE_LOGIN_POR_MINUTO", "5"))
 JANELA_SEGUNDOS = 60
+# menor que o REDIS_TIMEOUT de proposito: com o redis fora, o fail-open cobra
+# esse tempo de toda requisicao
+LIMITE_REDIS_TIMEOUT = float(os.getenv("LIMITE_REDIS_TIMEOUT", "0.5"))
 # contador no redis, e nao em memoria, para valer igual em todas as replicas.
 _redis = redis.Redis.from_url(
     os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-    # curto para um redis lento ou fora do ar nao segurar a requisicao
-    socket_connect_timeout=0.5, socket_timeout=0.5)
+    socket_connect_timeout=LIMITE_REDIS_TIMEOUT,
+    socket_timeout=LIMITE_REDIS_TIMEOUT)
 # derivada do segredo do jwt para nao usar a mesma chave em duas funcoes.
 _CHAVE_APELIDO = hmac.new(JWT_SEGREDO.encode(), b"limite",
                           hashlib.sha256).digest()
@@ -210,7 +213,8 @@ def _uma_chamada(metodo: str, caminho: str, **kwargs) -> requests.Response:
     except requests.RequestException as e:
         raise FalhaTransitoria(type(e).__name__) from e
     if r.status_code >= 500:
-        raise FalhaTransitoria(f"http {r.status_code}")
+        raise FalhaTransitoria(f"http {r.status_code}",
+                               r.headers.get("Retry-After"))
     return r
 
 
@@ -227,10 +231,15 @@ def _chamar_inferencia(metodo: str, caminho: str, **kwargs) -> dict:
         raise HTTPException(
             status_code=503, detail="servico de inferencia indisponivel",
             headers={"Retry-After": str(max(1, int(e.restante + 0.999)))})
-    except FalhaTransitoria:
+    except FalhaTransitoria as e:
         # o detalhe tecnico (endereco interno) fica so no log
+        # repassa a espera que a inferencia pediu; sem ela, usa a do
+        # disjuntor, o tempo que ja se da para ela se recuperar
+        espera = e.retry_after or str(
+            max(1, int(disjuntor_inferencia.espera_segundos + 0.999)))
         raise HTTPException(status_code=503,
-                            detail="servico de inferencia indisponivel")
+                            detail="servico de inferencia indisponivel",
+                            headers={"Retry-After": espera})
     if r.status_code >= 400:  # erro do cliente (4xx) volta igual
         try:
             detalhe = r.json().get("detail", r.reason)

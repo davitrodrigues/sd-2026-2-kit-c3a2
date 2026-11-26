@@ -1,6 +1,7 @@
 # worker (vindo do C1.A2): consome a fila do redis, roda a inferencia e grava
-# o resultado. em caso de falha a tarefa volta para a fila; apos 3 tentativas
-# vai para a fila de descarte (dead-letter) e o cliente ve status "falhou".
+# o resultado. em caso de falha a tarefa volta para a fila; apos
+# WORKER_MAX_TENTATIVAS (padrao 3) vai para a fila de descarte (dead-letter) e
+# o cliente ve status "falhou".
 #
 # rodar: python worker.py
 # ambiente: REDIS_URL
@@ -19,7 +20,7 @@ import rastreio
 from log import registrar_requisicao
 from modelo import carregar_modelo
 
-MAX_TENTATIVAS = 3
+MAX_TENTATIVAS = int(os.getenv("WORKER_MAX_TENTATIVAS", "3"))
 # espera progressiva quando o redis cai: 1, 2, 4, 8... ate o teto
 ESPERA_REDIS_BASE = float(os.getenv("WORKER_ESPERA_REDIS_BASE", "1"))
 ESPERA_REDIS_MAXIMA = float(os.getenv("WORKER_ESPERA_REDIS_MAXIMA", "30"))
